@@ -1,8 +1,13 @@
 package com.bycho.safereturnhome.ui.screen.map
 
 import android.Manifest
+import android.app.Activity
+import android.app.PendingIntent
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -12,6 +17,7 @@ import android.graphics.Path
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Looper
 import android.os.Build
 import android.os.VibrationEffect
@@ -25,6 +31,7 @@ import android.view.Surface
 import android.view.WindowManager
 import android.util.Log
 import android.speech.tts.TextToSpeech
+import android.telephony.SmsManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -36,9 +43,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +72,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -72,6 +84,9 @@ import androidx.core.os.CancellationSignal
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bycho.safereturnhome.BuildConfig
 import com.bycho.safereturnhome.R
+import com.bycho.safereturnhome.data.GuardianPreferences
+import com.bycho.safereturnhome.data.RecentDestinationPreferences
+import com.bycho.safereturnhome.data.guardianPhoneNumberError
 import com.bycho.safereturnhome.ui.state.DestinationSearchResult
 import com.bycho.safereturnhome.ui.state.MapUiState
 import com.bycho.safereturnhome.ui.viewmodel.MapViewModel
@@ -81,7 +96,10 @@ import com.skt.tmap.TMapView
 import com.skt.tmap.overlay.TMapCircle
 import com.skt.tmap.overlay.TMapMarkerItem
 import kotlin.math.abs
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
+import org.w3c.dom.Element
 
 private const val TMAP_LOG_TAG = "TMapViewContainer"
 private const val DEFAULT_LATITUDE = 37.5665
@@ -97,6 +115,16 @@ private const val HEADING_SMOOTHING_FACTOR = 0.18f
 private const val ROUTE_DEVIATION_THRESHOLD_METERS = 50f
 private const val ROUTE_DEVIATION_CONFIRMATION_COUNT = 3
 private const val DESTINATION_ARRIVAL_THRESHOLD_METERS = 20f
+private const val GUIDANCE_STEP_REACHED_THRESHOLD_METERS = 18f
+private const val GUIDANCE_EARLY_ANNOUNCEMENT_METERS = 100
+private const val GUIDANCE_NEAR_ANNOUNCEMENT_METERS = 30
+private const val GUIDANCE_TURN_REFERENCE_DISTANCE_METERS = 18f
+private const val GUIDANCE_MIN_TURN_DEGREES = 35f
+private const val GUIDANCE_MIN_STEP_SPACING_METERS = 25f
+private const val SOS_COUNTDOWN_SECONDS = 5
+private const val SOS_HOLD_DURATION_MILLIS = 3_000L
+private const val SOS_SMS_SENT_ACTION = "com.bycho.safereturnhome.SOS_SMS_SENT"
+private const val SOS_SMS_REQUEST_ID_KEY = "sos-sms-request-id"
 
 private class MapRenderState {
     var centeredLatitude: Double? = null
@@ -115,17 +143,29 @@ private data class RemainingRouteMetrics(
     val distanceFromRouteMeters: Float
 )
 
+private data class RouteGuidanceStep(
+    val instruction: String,
+    val maneuver: String,
+    val latitude: Double,
+    val longitude: Double
+)
+
+private data class SmsSendRequest(
+    val requestId: Int,
+    val partCount: Int
+)
+
 @Composable
 fun MapRoute(
     onBackClick: () -> Unit,
-    onConfirmRouteClick: () -> Unit,
+    onNavigationFinished: () -> Unit,
     viewModel: MapViewModel = viewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
     MapScreen(
         uiState = uiState,
         onBackClick = onBackClick,
-        onConfirmRouteClick = onConfirmRouteClick,
+        onNavigationFinished = onNavigationFinished,
         onMapReady = viewModel::onMapReady,
         onApiKeyFailed = viewModel::onApiKeyFailed,
         onLocationPermissionResult = viewModel::onLocationPermissionResult,
@@ -150,7 +190,7 @@ fun MapRoute(
 fun MapScreen(
     uiState: MapUiState,
     onBackClick: () -> Unit,
-    onConfirmRouteClick: () -> Unit,
+    onNavigationFinished: () -> Unit,
     onMapReady: () -> Unit,
     onApiKeyFailed: (String?) -> Unit,
     onLocationPermissionResult: (Boolean) -> Unit,
@@ -170,6 +210,8 @@ fun MapScreen(
 ) {
     val context = LocalContext.current
     val rootView = LocalView.current
+    val guardianPreferences = remember(context) { GuardianPreferences(context) }
+    val recentDestinationPreferences = remember(context) { RecentDestinationPreferences(context) }
     var recenterRequestId by remember { mutableIntStateOf(0) }
     var destinationFocusRequestId by remember { mutableIntStateOf(0) }
     var routeSearchRequestId by remember { mutableIntStateOf(0) }
@@ -180,9 +222,38 @@ fun MapScreen(
     var tMapView by remember { mutableStateOf<TMapView?>(null) }
     var textToSpeech by remember { mutableStateOf<TextToSpeech?>(null) }
     var activeRoutePoints by remember { mutableStateOf<List<TMapPoint>>(emptyList()) }
+    var routeGuidanceSteps by remember { mutableStateOf<List<RouteGuidanceStep>>(emptyList()) }
+    var currentGuidanceStepIndex by remember { mutableIntStateOf(0) }
+    var announcedGuidanceStepIndex by remember { mutableIntStateOf(-1) }
+    var announcedGuidanceThresholdMeters by remember { mutableIntStateOf(Int.MAX_VALUE) }
     var consecutiveRouteDeviationCount by remember { mutableIntStateOf(0) }
     var isRouteRecalculationInProgress by remember { mutableStateOf(false) }
     var hasArrivedAtDestination by remember { mutableStateOf(false) }
+    var isArrivalNoticeVisible by remember { mutableStateOf(false) }
+    var isNavigationEndConfirmationVisible by remember { mutableStateOf(false) }
+    var isUpcomingGuidanceExpanded by remember { mutableStateOf(false) }
+    var savedGuardianPhoneNumber by remember {
+        mutableStateOf(guardianPreferences.getPhoneNumber())
+    }
+    var sosCountdownSeconds by remember { mutableStateOf<Int?>(null) }
+    var sosNoticeMessage by remember { mutableStateOf<String?>(null) }
+    var activeSmsRequest by remember { mutableStateOf<SmsSendRequest?>(null) }
+    var sentSmsPartCount by remember { mutableIntStateOf(0) }
+    val sendSosMessage: () -> Unit = {
+        val sendRequest = sendGuardianSms(
+            context = context,
+            guardianPhoneNumber = savedGuardianPhoneNumber,
+            latitude = uiState.currentLatitude,
+            longitude = uiState.currentLongitude
+        )
+        activeSmsRequest = sendRequest
+        sentSmsPartCount = 0
+        sosNoticeMessage = if (sendRequest != null) {
+            "SOS 문자 전송을 요청했습니다"
+        } else {
+            "SOS 문자 전송 요청에 실패했습니다"
+        }
+    }
     val onTrackedLocationLoaded: (Double, Double, Float, Float) -> Unit =
         { latitude, longitude, accuracyMeters, bearingDegrees ->
             onCurrentLocationLoaded(latitude, longitude, accuracyMeters, bearingDegrees)
@@ -206,6 +277,7 @@ fun MapScreen(
                     isRouteRecalculationInProgress = false
                     consecutiveRouteDeviationCount = 0
                     onDestinationArrived()
+                    isArrivalNoticeVisible = true
                     speak(textToSpeech, "목적지에 도착했습니다.")
                     vibrateArrival(context)
                 } else if (!isRouteRecalculationInProgress) {
@@ -225,6 +297,53 @@ fun MapScreen(
                     }
                 }
             }
+            if (routeGuidanceSteps.isNotEmpty() && !hasArrivedAtDestination) {
+                var guidanceStepIndex = currentGuidanceStepIndex.coerceAtMost(routeGuidanceSteps.lastIndex)
+                var guidanceStep = routeGuidanceSteps[guidanceStepIndex]
+                var distanceToGuidanceStep = calculateDistanceMeters(
+                    latitude,
+                    longitude,
+                    guidanceStep.latitude,
+                    guidanceStep.longitude
+                )
+                while (
+                    distanceToGuidanceStep <= GUIDANCE_STEP_REACHED_THRESHOLD_METERS &&
+                    guidanceStepIndex < routeGuidanceSteps.lastIndex
+                ) {
+                    guidanceStepIndex += 1
+                    guidanceStep = routeGuidanceSteps[guidanceStepIndex]
+                    distanceToGuidanceStep = calculateDistanceMeters(
+                        latitude,
+                        longitude,
+                        guidanceStep.latitude,
+                        guidanceStep.longitude
+                    )
+                }
+                if (guidanceStepIndex != currentGuidanceStepIndex) {
+                    currentGuidanceStepIndex = guidanceStepIndex
+                    announcedGuidanceStepIndex = -1
+                    announcedGuidanceThresholdMeters = Int.MAX_VALUE
+                }
+                val announcementThresholdMeters = when {
+                    distanceToGuidanceStep <= GUIDANCE_NEAR_ANNOUNCEMENT_METERS ->
+                        GUIDANCE_NEAR_ANNOUNCEMENT_METERS
+                    distanceToGuidanceStep <= GUIDANCE_EARLY_ANNOUNCEMENT_METERS ->
+                        GUIDANCE_EARLY_ANNOUNCEMENT_METERS
+                    else -> null
+                }
+                if (
+                    announcementThresholdMeters != null &&
+                    (announcedGuidanceStepIndex != guidanceStepIndex ||
+                        announcedGuidanceThresholdMeters != announcementThresholdMeters)
+                ) {
+                    speak(
+                        textToSpeech,
+                        "${distanceToGuidanceStep.toInt()}미터 앞에서 ${guidanceStep.instruction}"
+                    )
+                    announcedGuidanceStepIndex = guidanceStepIndex
+                    announcedGuidanceThresholdMeters = announcementThresholdMeters
+                }
+            }
         }
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -236,6 +355,15 @@ fun MapScreen(
                 onLocationLoaded = onTrackedLocationLoaded,
                 onLocationUnavailable = onCurrentLocationUnavailable
             )
+        }
+    }
+    val smsPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
+        } else {
+            sosNoticeMessage = "보호자에게 SOS 문자를 보내려면 문자 권한이 필요합니다"
         }
     }
 
@@ -259,6 +387,17 @@ fun MapScreen(
         }
     }
 
+    LaunchedEffect(sosCountdownSeconds) {
+        val seconds = sosCountdownSeconds ?: return@LaunchedEffect
+        if (seconds > 0) {
+            delay(1_000L)
+            sosCountdownSeconds = seconds - 1
+        } else {
+            sendSosMessage()
+            sosCountdownSeconds = null
+        }
+    }
+
     DisposableEffect(uiState.hasApiKey, uiState.isLocationPermissionGranted) {
         if (!uiState.hasApiKey || !uiState.isLocationPermissionGranted) {
             onDispose {}
@@ -278,6 +417,33 @@ fun MapScreen(
             onHeadingChanged = { deviceHeadingDegrees = it }
         )
         onDispose(stopHeadingUpdates)
+    }
+
+    DisposableEffect(context) {
+        val smsSentReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val request = activeSmsRequest ?: return
+                if (intent?.getIntExtra(SOS_SMS_REQUEST_ID_KEY, -1) != request.requestId) return
+
+                if (resultCode == Activity.RESULT_OK) {
+                    sentSmsPartCount += 1
+                    if (sentSmsPartCount >= request.partCount) {
+                        activeSmsRequest = null
+                        sosNoticeMessage = "보호자에게 SOS 문자를 전송했습니다"
+                    }
+                } else {
+                    activeSmsRequest = null
+                    sosNoticeMessage = smsSendFailureMessage(resultCode)
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            context,
+            smsSentReceiver,
+            IntentFilter(SOS_SMS_SENT_ACTION),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        onDispose { context.unregisterReceiver(smsSentReceiver) }
     }
 
     DisposableEffect(context) {
@@ -338,6 +504,25 @@ fun MapScreen(
                     }
                 }
             )
+        },
+        floatingActionButton = {
+            SosFloatingActionButton(
+                onSosActivated = {
+                    if (guardianPhoneNumberError(savedGuardianPhoneNumber) != null) {
+                        sosNoticeMessage = "보호자 설정에서 올바른 휴대폰 번호를 먼저 저장해주세요"
+                    } else if (
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.SEND_SMS
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
+                    } else {
+                        vibrate(context, longArrayOf(0, 120, 80, 120))
+                        sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
+                    }
+                }
+            )
         }
     ) { innerPadding ->
         Column(
@@ -386,7 +571,17 @@ fun MapScreen(
                             isRouteRecalculationInProgress = false
                             consecutiveRouteDeviationCount = 0
                             activeRoutePoints = emptyList()
+                            routeGuidanceSteps = emptyList()
+                            currentGuidanceStepIndex = 0
+                            announcedGuidanceStepIndex = -1
+                            announcedGuidanceThresholdMeters = Int.MAX_VALUE
                             destinationFocusRequestId += 1
+                            recentDestinationPreferences.saveRecentDestination(
+                                name = result.name,
+                                address = result.address,
+                                latitude = result.latitude,
+                                longitude = result.longitude
+                            )
                             onDestinationSelected(result)
                         }
                     ) {
@@ -397,6 +592,45 @@ fun MapScreen(
                     text = "지도를 불러온 뒤 현재 위치를 확인하고, 다음 단계에서 목적지와 경로를 연결합니다.",
                     style = MaterialTheme.typography.bodyLarge
                 )
+            }
+            if (isNavigationMode) {
+                val guidanceStep = routeGuidanceSteps.getOrNull(currentGuidanceStepIndex)
+                val distanceToGuidanceStep = if (
+                    guidanceStep != null &&
+                    uiState.currentLatitude != null &&
+                    uiState.currentLongitude != null
+                ) {
+                    calculateDistanceMeters(
+                        startLatitude = uiState.currentLatitude,
+                        startLongitude = uiState.currentLongitude,
+                        endLatitude = guidanceStep.latitude,
+                        endLongitude = guidanceStep.longitude
+                    ).toInt()
+                } else {
+                    null
+                }
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = guidanceStep?.maneuver?.ifBlank { "다음 안내" }
+                                ?: "경로 안내 준비 중",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        if (
+                            guidanceStep != null &&
+                            guidanceStep.instruction.isNotBlank() &&
+                            guidanceStep.instruction != guidanceStep.maneuver
+                        ) {
+                            Text(text = guidanceStep.instruction)
+                        }
+                        distanceToGuidanceStep?.let { distanceMeters ->
+                            Text(text = "${distanceMeters}m 앞")
+                        }
+                    }
+                }
             }
             Box(
                 modifier = Modifier
@@ -444,7 +678,13 @@ fun MapScreen(
                         isRouteRecalculationInProgress = false
                         onRouteSearchFailed(reason)
                     },
-                    onRoutePointsChanged = { activeRoutePoints = it }
+                    onRoutePointsChanged = { activeRoutePoints = it },
+                    onRouteGuidanceStepsChanged = { steps ->
+                        routeGuidanceSteps = steps
+                        currentGuidanceStepIndex = 0
+                        announcedGuidanceStepIndex = -1
+                        announcedGuidanceThresholdMeters = Int.MAX_VALUE
+                    }
                 )
                 Button(
                     modifier = Modifier
@@ -514,12 +754,64 @@ fun MapScreen(
                 }
             }
             if (isNavigationMode) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                isUpcomingGuidanceExpanded = !isUpcomingGuidanceExpanded
+                            }
+                        ) {
+                            Text(
+                                if (isUpcomingGuidanceExpanded) {
+                                    "앞으로의 경로 접기"
+                                } else {
+                                    "앞으로의 경로 펼치기"
+                                }
+                            )
+                        }
+                        if (isUpcomingGuidanceExpanded) {
+                            val upcomingGuidanceSteps = routeGuidanceSteps
+                                .drop(currentGuidanceStepIndex)
+                                .take(5)
+                            if (upcomingGuidanceSteps.isEmpty()) {
+                                Text("표시할 다음 안내가 없습니다")
+                            } else {
+                                upcomingGuidanceSteps.forEach { guidanceStep ->
+                                    val distanceMeters = if (
+                                        uiState.currentLatitude != null &&
+                                        uiState.currentLongitude != null
+                                    ) {
+                                        calculateRouteDistanceToGuidanceStepMeters(
+                                            currentLatitude = uiState.currentLatitude,
+                                            currentLongitude = uiState.currentLongitude,
+                                            routePoints = activeRoutePoints,
+                                            guidanceStep = guidanceStep
+                                        )
+                                    } else {
+                                        null
+                                    }
+                                    Text(
+                                        text = buildString {
+                                            if (distanceMeters != null) {
+                                                append("${distanceMeters}m 앞 ")
+                                            }
+                                            append(guidanceStep.maneuver)
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (isNavigationMode) {
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
-                    onClick = {
-                        isNavigationMode = false
-                        isNorthUpMode = false
-                    }
+                    onClick = { isNavigationEndConfirmationVisible = true }
                 ) {
                     Text("경로 안내 종료")
                 }
@@ -539,6 +831,197 @@ fun MapScreen(
                 }
             }
         }
+    }
+
+    sosCountdownSeconds?.let { seconds ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("SOS 문자 자동 전송 준비") },
+            text = {
+                Text(
+                    if (seconds > 0) {
+                        "${seconds}초 후 보호자에게 SOS 문자를 자동으로 전송합니다"
+                    } else {
+                        "보호자에게 SOS 문자를 전송하는 중입니다"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        sendSosMessage()
+                        sosCountdownSeconds = null
+                    }
+                ) {
+                    Text("지금 전송")
+                }
+            },
+            dismissButton = {
+                Column {
+                    TextButton(onClick = { sosCountdownSeconds = null }) {
+                        Text("취소")
+                    }
+                    TextButton(onClick = { openEmergencyDialer(context) }) {
+                        Text("112 전화 연결")
+                    }
+                }
+            }
+        )
+    }
+
+    if (isArrivalNoticeVisible) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("목적지 도착") },
+            text = { Text("목적지에 도착했습니다. 안전한 귀가가 완료되었습니다.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isArrivalNoticeVisible = false
+                        onNavigationFinished()
+                    }
+                ) {
+                    Text("홈으로 돌아가기")
+                }
+            }
+        )
+    }
+
+    if (isNavigationEndConfirmationVisible) {
+        AlertDialog(
+            onDismissRequest = { isNavigationEndConfirmationVisible = false },
+            title = { Text("경로 안내 종료") },
+            text = { Text("현재 경로 안내를 종료하고 홈 화면으로 돌아갈까요?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        isNavigationEndConfirmationVisible = false
+                        isNavigationMode = false
+                        isNorthUpMode = false
+                        isUpcomingGuidanceExpanded = false
+                        onNavigationFinished()
+                    }
+                ) {
+                    Text("종료하기")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { isNavigationEndConfirmationVisible = false }) {
+                    Text("계속 안내")
+                }
+            }
+        )
+    }
+
+    sosNoticeMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { sosNoticeMessage = null },
+            title = { Text("SOS 설정") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { sosNoticeMessage = null }) {
+                    Text("확인")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SosFloatingActionButton(
+    onSosActivated: () -> Unit
+) {
+    FloatingActionButton(
+        modifier = Modifier.pointerInput(onSosActivated) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                val wasHeldLongEnough = withTimeoutOrNull(SOS_HOLD_DURATION_MILLIS) {
+                    while (awaitPointerEvent().changes.any { it.pressed }) {
+                        // Wait until the user releases before the hold duration.
+                    }
+                    false
+                } ?: true
+                if (wasHeldLongEnough) {
+                    onSosActivated()
+                    while (awaitPointerEvent().changes.any { it.pressed }) {
+                        // Prevent another SOS activation before the current press is released.
+                    }
+                }
+            }
+        },
+        onClick = {},
+        containerColor = MaterialTheme.colorScheme.error,
+        contentColor = MaterialTheme.colorScheme.onError
+    ) {
+        Text("SOS\n3초")
+    }
+}
+
+private fun sendGuardianSms(
+    context: Context,
+    guardianPhoneNumber: String,
+    latitude: Double?,
+    longitude: Double?
+): SmsSendRequest? {
+    val locationMessage = if (latitude != null && longitude != null) {
+        "현재 위치: https://maps.google.com/?q=$latitude,$longitude"
+    } else {
+        "현재 위치를 확인할 수 없습니다"
+    }
+    val message = "[안전귀가 SOS] 도움이 필요합니다. $locationMessage"
+    return runCatching {
+        val normalizedPhoneNumber = guardianPhoneNumber.filterIndexed { index, character ->
+            character.isDigit() || (character == '+' && index == 0)
+        }
+        require(normalizedPhoneNumber.isNotBlank()) { "Guardian phone number is blank." }
+        val smsManager = context.getSystemService(SmsManager::class.java)
+            ?: error("SMS service is unavailable.")
+        val messageParts = smsManager.divideMessage(message)
+        val requestId = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+        val sentIntents = ArrayList<PendingIntent>(messageParts.size)
+        messageParts.indices.forEach { partIndex ->
+            val sentIntent = Intent(SOS_SMS_SENT_ACTION)
+                .setPackage(context.packageName)
+                .putExtra(SOS_SMS_REQUEST_ID_KEY, requestId)
+            sentIntents += PendingIntent.getBroadcast(
+                context,
+                requestId + partIndex,
+                sentIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+        smsManager.sendMultipartTextMessage(
+            normalizedPhoneNumber,
+            null,
+            messageParts,
+            sentIntents,
+            null
+        )
+        SmsSendRequest(requestId = requestId, partCount = messageParts.size)
+    }.onFailure { error ->
+        Log.e(TMAP_LOG_TAG, "Failed to send the guardian SMS.", error)
+    }.getOrNull()
+}
+
+private fun smsSendFailureMessage(resultCode: Int): String {
+    val reason = when (resultCode) {
+        SmsManager.RESULT_ERROR_RADIO_OFF -> "휴대폰 통신 기능이 꺼져 있습니다"
+        SmsManager.RESULT_ERROR_NO_SERVICE -> "통신 서비스에 연결되지 않았습니다"
+        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "문자 전송 한도를 초과했습니다"
+        SmsManager.RESULT_ERROR_FDN_CHECK_FAILURE -> "발신 제한 설정으로 차단되었습니다"
+        else -> "통신사 또는 기기에서 전송을 거절했습니다"
+    }
+    return "SOS 문자 전송에 실패했습니다: $reason"
+}
+
+private fun openEmergencyDialer(context: Context) {
+    val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:112")).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching {
+        context.startActivity(intent)
+    }.onFailure { error ->
+        Log.e(TMAP_LOG_TAG, "Failed to open the emergency dialer.", error)
     }
 }
 
@@ -562,7 +1045,8 @@ private fun TMapViewContainer(
     onMapViewCreated: (TMapView) -> Unit,
     onRouteSearchCompleted: (Int) -> Unit,
     onRouteSearchFailed: (String) -> Unit,
-    onRoutePointsChanged: (List<TMapPoint>) -> Unit
+    onRoutePointsChanged: (List<TMapPoint>) -> Unit,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
 ) {
     var lastDestinationFocusRequestId by remember { mutableIntStateOf(0) }
     val renderState = remember { MapRenderState() }
@@ -715,7 +1199,8 @@ private fun TMapViewContainer(
                     destinationPoint = TMapPoint(destination.latitude, destination.longitude),
                     onRouteSearchCompleted = onRouteSearchCompleted,
                     onRouteSearchFailed = onRouteSearchFailed,
-                    onRoutePointsChanged = onRoutePointsChanged
+                    onRoutePointsChanged = onRoutePointsChanged,
+                    onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged
                 )
             }
         }
@@ -816,8 +1301,15 @@ private fun findAndShowPedestrianRoute(
     destinationPoint: TMapPoint,
     onRouteSearchCompleted: (Int) -> Unit,
     onRouteSearchFailed: (String) -> Unit,
-    onRoutePointsChanged: (List<TMapPoint>) -> Unit
+    onRoutePointsChanged: (List<TMapPoint>) -> Unit,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
 ) {
+    findRouteGuidanceSteps(
+        view = view,
+        startPoint = startPoint,
+        destinationPoint = destinationPoint,
+        onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged
+    )
     runCatching {
         TMapData().findPathDataWithType(
             TMapData.TMapPathType.PEDESTRIAN_PATH,
@@ -839,6 +1331,14 @@ private fun findAndShowPedestrianRoute(
                             view.setTMapPath(polyLine)
                             view.fitBounds(view.getBoundsFromPoints(polyLine.linePointList))
                             onRoutePointsChanged(polyLine.linePointList.toList())
+                            val fallbackGuidanceSteps =
+                                deriveRouteGuidanceSteps(polyLine.linePointList)
+                            Log.i(
+                                TMAP_LOG_TAG,
+                                "Generated ${fallbackGuidanceSteps.size} guidance steps " +
+                                    "from the pedestrian route polyline."
+                            )
+                            onRouteGuidanceStepsChanged(fallbackGuidanceSteps)
                             onRouteSearchCompleted(calculatePolylineDistanceMeters(polyLine))
                         }.onFailure { error ->
                             Log.e(TMAP_LOG_TAG, "Failed to show pedestrian route.", error)
@@ -852,6 +1352,236 @@ private fun findAndShowPedestrianRoute(
         Log.e(TMAP_LOG_TAG, "Failed to search pedestrian route.", error)
         view.post {
             onRouteSearchFailed(error.message ?: "unknown error")
+        }
+    }
+}
+
+private fun findRouteGuidanceSteps(
+    view: TMapView,
+    startPoint: TMapPoint,
+    destinationPoint: TMapPoint,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
+) {
+    view.post {
+        onRouteGuidanceStepsChanged(emptyList())
+    }
+    Log.i(TMAP_LOG_TAG, "Requesting turn-by-turn guidance.")
+    runCatching {
+        TMapData().findPathDataAllType(
+            TMapData.TMapPathType.PEDESTRIAN_PATH,
+            startPoint,
+            destinationPoint,
+            object : TMapData.OnFindPathDataAllTypeListener {
+                override fun onFindPathDataAllType(document: org.w3c.dom.Document?) {
+                    if (document == null) {
+                        Log.w(TMAP_LOG_TAG, "Turn-by-turn guidance response document is null.")
+                    }
+                    val guidanceSteps = document?.let(::parseRouteGuidanceSteps).orEmpty()
+                    if (guidanceSteps.isEmpty() && document != null) {
+                        Log.w(
+                            TMAP_LOG_TAG,
+                            "Loaded 0 turn-by-turn guidance steps. " +
+                                summarizeRouteGuidanceDocument(document)
+                        )
+                    } else {
+                        Log.i(
+                            TMAP_LOG_TAG,
+                            "Loaded ${guidanceSteps.size} turn-by-turn guidance steps."
+                        )
+                    }
+                    if (guidanceSteps.isNotEmpty()) {
+                        view.post {
+                            onRouteGuidanceStepsChanged(guidanceSteps)
+                        }
+                    }
+                }
+            }
+        )
+    }.onFailure { error ->
+        Log.w(TMAP_LOG_TAG, "Failed to load turn-by-turn guidance.", error)
+    }
+}
+
+private fun deriveRouteGuidanceSteps(routePoints: List<TMapPoint>): List<RouteGuidanceStep> {
+    if (routePoints.isEmpty()) return emptyList()
+
+    val guidanceSteps = mutableListOf<RouteGuidanceStep>()
+    var lastGuidancePoint = routePoints.first()
+    for (index in 1 until routePoints.lastIndex) {
+        val turnPoint = routePoints[index]
+        val incomingPoint = findRouteReferencePoint(routePoints, index, -1)
+        val outgoingPoint = findRouteReferencePoint(routePoints, index, 1)
+        if (incomingPoint == turnPoint || outgoingPoint == turnPoint) continue
+
+        val incomingBearing = calculateBearingDegrees(incomingPoint, turnPoint)
+        val outgoingBearing = calculateBearingDegrees(turnPoint, outgoingPoint)
+        val turnDegrees = shortestAngleDifference(incomingBearing, outgoingBearing)
+        if (
+            abs(turnDegrees) < GUIDANCE_MIN_TURN_DEGREES ||
+            calculateDistanceMeters(
+                lastGuidancePoint.latitude,
+                lastGuidancePoint.longitude,
+                turnPoint.latitude,
+                turnPoint.longitude
+            ) < GUIDANCE_MIN_STEP_SPACING_METERS
+        ) {
+            continue
+        }
+
+        val maneuver = if (turnDegrees > 0f) "우회전하세요" else "좌회전하세요"
+        guidanceSteps += RouteGuidanceStep(
+            instruction = maneuver,
+            maneuver = maneuver,
+            latitude = turnPoint.latitude,
+            longitude = turnPoint.longitude
+        )
+        lastGuidancePoint = turnPoint
+    }
+
+    val destinationPoint = routePoints.last()
+    guidanceSteps += RouteGuidanceStep(
+        instruction = "목적지에 도착합니다",
+        maneuver = "목적지 도착",
+        latitude = destinationPoint.latitude,
+        longitude = destinationPoint.longitude
+    )
+    return guidanceSteps
+}
+
+private fun findRouteReferencePoint(
+    routePoints: List<TMapPoint>,
+    pivotIndex: Int,
+    direction: Int
+): TMapPoint {
+    val pivotPoint = routePoints[pivotIndex]
+    var index = pivotIndex + direction
+    while (index in routePoints.indices) {
+        val candidatePoint = routePoints[index]
+        if (
+            calculateDistanceMeters(
+                pivotPoint.latitude,
+                pivotPoint.longitude,
+                candidatePoint.latitude,
+                candidatePoint.longitude
+            ) >= GUIDANCE_TURN_REFERENCE_DISTANCE_METERS
+        ) {
+            return candidatePoint
+        }
+        index += direction
+    }
+    return pivotPoint
+}
+
+private fun calculateBearingDegrees(startPoint: TMapPoint, endPoint: TMapPoint): Float {
+    val results = FloatArray(3)
+    Location.distanceBetween(
+        startPoint.latitude,
+        startPoint.longitude,
+        endPoint.latitude,
+        endPoint.longitude,
+        results
+    )
+    return normalizeDegrees(results[1])
+}
+
+private fun summarizeRouteGuidanceDocument(document: org.w3c.dom.Document): String {
+    val nodes = document.getElementsByTagName("*")
+    val tagNames = buildList {
+        for (index in 0 until nodes.length) {
+            add(nodes.item(index).nodeName)
+        }
+    }.distinct()
+        .take(30)
+        .joinToString()
+    return "root=${document.documentElement?.nodeName}, " +
+        "elementCount=${nodes.length}, tags=[$tagNames]"
+}
+
+private fun parseRouteGuidanceSteps(document: org.w3c.dom.Document): List<RouteGuidanceStep> {
+    val featureMembers = document.findDescendantElements("featureMember")
+    return buildList {
+        for (featureMember in featureMembers) {
+            val coordinateText = featureMember.findFirstDescendantText("coordinates") ?: continue
+            val coordinates = coordinateText.trim().split(",")
+            val longitude = coordinates.getOrNull(0)?.trim()?.toDoubleOrNull() ?: continue
+            val latitude = coordinates.getOrNull(1)?.trim()?.toDoubleOrNull() ?: continue
+            val description = featureMember.findFirstDescendantText("description")
+                ?.trim()
+                .orEmpty()
+            val turnType = featureMember.findFirstDescendantText("turnType")
+                ?.trim()
+                ?.toIntOrNull()
+            val pointType = featureMember.findFirstDescendantText("pointType")
+                ?.trim()
+                .orEmpty()
+            if (turnType == null && pointType.isBlank()) continue
+            val maneuver = maneuverLabel(turnType, pointType)
+            val instruction = description.ifBlank { maneuver }
+            if (instruction.isBlank()) continue
+
+            add(
+                RouteGuidanceStep(
+                    instruction = instruction,
+                    maneuver = maneuver,
+                    latitude = latitude,
+                    longitude = longitude
+                )
+            )
+        }
+    }.distinctBy { "${it.latitude},${it.longitude}:${it.instruction}" }
+}
+
+private fun org.w3c.dom.Document.findDescendantElements(localName: String): List<Element> {
+    val namespacedNodes = getElementsByTagNameNS("*", localName)
+    if (namespacedNodes.length > 0) {
+        return buildList {
+            for (index in 0 until namespacedNodes.length) {
+                (namespacedNodes.item(index) as? Element)?.let(::add)
+            }
+        }
+    }
+
+    val fallbackNodes = getElementsByTagName("*")
+    return buildList {
+        for (index in 0 until fallbackNodes.length) {
+            val node = fallbackNodes.item(index)
+            if (node.nodeName.substringAfter(":") == localName) {
+                (node as? Element)?.let(::add)
+            }
+        }
+    }
+}
+
+private fun Element.findFirstDescendantText(localName: String): String? {
+    val nodes = getElementsByTagNameNS("*", localName)
+    if (nodes.length > 0) return nodes.item(0)?.textContent
+
+    val fallbackNodes = getElementsByTagName("*")
+    for (index in 0 until fallbackNodes.length) {
+        val node = fallbackNodes.item(index)
+        if (node.nodeName.substringAfter(":") == localName) return node.textContent
+    }
+    return null
+}
+
+private fun maneuverLabel(turnType: Int?, pointType: String): String {
+    return when (turnType) {
+        11 -> "직진하세요"
+        12 -> "좌회전하세요"
+        13 -> "우회전하세요"
+        14 -> "유턴하세요"
+        16, 17 -> "왼쪽 방향으로 이동하세요"
+        18, 19 -> "오른쪽 방향으로 이동하세요"
+        125 -> "육교를 이용하세요"
+        126 -> "지하보도를 이용하세요"
+        127 -> "계단을 이용하세요"
+        211 -> "횡단보도를 건너세요"
+        212 -> "좌측 횡단보도를 건너세요"
+        213 -> "우측 횡단보도를 건너세요"
+        else -> when {
+            pointType.startsWith("SP") -> "경로 안내를 시작합니다"
+            pointType.startsWith("EP") -> "목적지에 도착합니다"
+            else -> ""
         }
     }
 }
@@ -926,6 +1656,62 @@ private fun calculateRemainingRouteMetrics(
         remainingDistanceMeters = (distanceToNearestPoint + remainingPolylineDistance).toInt(),
         distanceFromRouteMeters = distanceToNearestPoint.toFloat()
     )
+}
+
+private fun calculateRouteDistanceToGuidanceStepMeters(
+    currentLatitude: Double,
+    currentLongitude: Double,
+    routePoints: List<TMapPoint>,
+    guidanceStep: RouteGuidanceStep
+): Int? {
+    if (routePoints.isEmpty()) return null
+
+    val currentRoutePointIndex = findNearestRoutePointIndex(
+        latitude = currentLatitude,
+        longitude = currentLongitude,
+        routePoints = routePoints
+    ) ?: return null
+    val guidanceRoutePointIndex = findNearestRoutePointIndex(
+        latitude = guidanceStep.latitude,
+        longitude = guidanceStep.longitude,
+        routePoints = routePoints
+    ) ?: return null
+    if (guidanceRoutePointIndex <= currentRoutePointIndex) return 0
+
+    val distanceToCurrentRoutePoint = calculateDistanceMeters(
+        startLatitude = currentLatitude,
+        startLongitude = currentLongitude,
+        endLatitude = routePoints[currentRoutePointIndex].latitude,
+        endLongitude = routePoints[currentRoutePointIndex].longitude
+    )
+    val routeDistanceMeters = routePoints
+        .subList(currentRoutePointIndex, guidanceRoutePointIndex + 1)
+        .zipWithNext()
+        .sumOf { (startPoint, endPoint) ->
+            calculateDistanceMeters(
+                startLatitude = startPoint.latitude,
+                startLongitude = startPoint.longitude,
+                endLatitude = endPoint.latitude,
+                endLongitude = endPoint.longitude
+            ).toDouble()
+        }
+    return (distanceToCurrentRoutePoint + routeDistanceMeters).toInt()
+}
+
+private fun findNearestRoutePointIndex(
+    latitude: Double,
+    longitude: Double,
+    routePoints: List<TMapPoint>
+): Int? {
+    return routePoints.indices.minByOrNull { index ->
+        val routePoint = routePoints[index]
+        calculateDistanceMeters(
+            startLatitude = latitude,
+            startLongitude = longitude,
+            endLatitude = routePoint.latitude,
+            endLongitude = routePoint.longitude
+        )
+    }
 }
 
 private fun calculateDistanceMeters(

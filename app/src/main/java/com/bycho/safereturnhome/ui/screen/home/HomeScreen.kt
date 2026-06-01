@@ -2,35 +2,74 @@ package com.bycho.safereturnhome.ui.screen.home
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bycho.safereturnhome.ui.state.HomeUiState
 import com.bycho.safereturnhome.ui.viewmodel.HomeViewModel
+import com.bycho.safereturnhome.data.GuardianPreferences
+import com.bycho.safereturnhome.data.RecentDestinationPreferences
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 @Composable
 fun HomeRoute(
     onStartTripClick: () -> Unit,
-    onSosClick: () -> Unit,
+    onGuardianSettingsClick: () -> Unit,
     viewModel: HomeViewModel = viewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val guardianPreferences = remember(context) { GuardianPreferences(context) }
+    val recentDestinationPreferences = remember(context) { RecentDestinationPreferences(context) }
+    var guardianRegistered by remember {
+        mutableStateOf(guardianPreferences.getPhoneNumber().isNotBlank())
+    }
+    var lastDestinationLabel by remember {
+        mutableStateOf(
+            recentDestinationPreferences.getRecentDestination()?.label()
+                ?: "최근 목적지가 없습니다."
+        )
+    }
+    DisposableEffect(lifecycleOwner, guardianPreferences, recentDestinationPreferences) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                guardianRegistered = guardianPreferences.getPhoneNumber().isNotBlank()
+                lastDestinationLabel = recentDestinationPreferences
+                    .getRecentDestination()
+                    ?.label()
+                    ?: "최근 목적지가 없습니다."
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     HomeScreen(
-        uiState = uiState,
+        uiState = uiState.copy(
+            guardianRegistered = guardianRegistered,
+            lastDestinationLabel = lastDestinationLabel
+        ),
         onStartTripClick = onStartTripClick,
-        onSosClick = onSosClick
+        onGuardianSettingsClick = onGuardianSettingsClick
     )
 }
 
@@ -38,7 +77,7 @@ fun HomeRoute(
 fun HomeScreen(
     uiState: HomeUiState,
     onStartTripClick: () -> Unit,
-    onSosClick: () -> Unit
+    onGuardianSettingsClick: () -> Unit
 ) {
     Scaffold { innerPadding ->
         Column(
@@ -53,7 +92,7 @@ fun HomeScreen(
                 style = MaterialTheme.typography.headlineMedium
             )
             Text(
-                text = "귀가 시작, 위치 공유, SOS 흐름을 검증하기 위한 MVP 화면입니다.",
+                text = "목적지를 설정하고 안전한 귀가 안내를 시작하세요.",
                 style = MaterialTheme.typography.bodyLarge
             )
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -62,26 +101,25 @@ fun HomeScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(text = "보호자 등록: ${if (uiState.guardianRegistered) "완료" else "미등록"}")
-                    Text(text = "활성 귀가: ${if (uiState.activeTrip) "진행 중" else "없음"}")
                     Text(text = uiState.lastDestinationLabel)
                 }
             }
-            Row(
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Button(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth(),
                     onClick = onStartTripClick
                 ) {
                     Text("귀가 시작")
                 }
-                Button(
-                    modifier = Modifier.weight(1f),
-                    onClick = onSosClick
-                ) {
-                    Text("SOS")
-                }
+            }
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onGuardianSettingsClick
+            ) {
+                Text("보호자 설정")
             }
         }
     }
