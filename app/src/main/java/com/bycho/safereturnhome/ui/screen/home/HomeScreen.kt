@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bycho.safereturnhome.ui.state.HomeUiState
+import com.bycho.safereturnhome.ui.state.SignalPollingUiState
 import com.bycho.safereturnhome.ui.viewmodel.HomeViewModel
 import com.bycho.safereturnhome.data.GuardianPreferences
 import com.bycho.safereturnhome.data.RecentDestinationPreferences
@@ -34,6 +35,8 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 fun HomeRoute(
     onStartTripClick: () -> Unit,
     onGuardianSettingsClick: () -> Unit,
+    onServerSettingsClick: () -> Unit,
+    signalPollingUiState: SignalPollingUiState,
     viewModel: HomeViewModel = viewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -68,16 +71,20 @@ fun HomeRoute(
             guardianRegistered = guardianRegistered,
             lastDestinationLabel = lastDestinationLabel
         ),
+        signalPollingUiState = signalPollingUiState,
         onStartTripClick = onStartTripClick,
-        onGuardianSettingsClick = onGuardianSettingsClick
+        onGuardianSettingsClick = onGuardianSettingsClick,
+        onServerSettingsClick = onServerSettingsClick
     )
 }
 
 @Composable
 fun HomeScreen(
     uiState: HomeUiState,
+    signalPollingUiState: SignalPollingUiState,
     onStartTripClick: () -> Unit,
-    onGuardianSettingsClick: () -> Unit
+    onGuardianSettingsClick: () -> Unit,
+    onServerSettingsClick: () -> Unit
 ) {
     Scaffold { innerPadding ->
         Column(
@@ -104,6 +111,21 @@ fun HomeScreen(
                     Text(text = uiState.lastDestinationLabel)
                 }
             }
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(text = "AI 서버 안전 상태")
+                    Text(text = signalPollingUiState.statusMessage)
+                    signalPollingUiState.latestStatus?.let {
+                        Text(text = "현재 상태: $it")
+                    }
+                    signalPollingUiState.serverMessage?.let {
+                        Text(text = it)
+                    }
+                }
+            }
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -120,6 +142,12 @@ fun HomeScreen(
                 onClick = onGuardianSettingsClick
             ) {
                 Text("보호자 설정")
+            }
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onServerSettingsClick
+            ) {
+                Text("서버 설정")
             }
         }
     }
