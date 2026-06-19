@@ -40,6 +40,31 @@ android {
                 "TMAP_API_KEY",
                 "\"${localProperties.getProperty("TMAP_API_KEY", "")}\""
             )
+            buildConfigField(
+                "String",
+                "CCTV_API_ENDPOINT",
+                "\"${localProperties.getProperty("CCTV_API_ENDPOINT", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "CCTV_API_KEY",
+                "\"${localProperties.getProperty("CCTV_API_KEY", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "CCTV_CRIME_PREVENTION_API_ENDPOINT",
+                "\"${localProperties.getProperty("CCTV_CRIME_PREVENTION_API_ENDPOINT", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "STREETLIGHT_API_ENDPOINT",
+                "\"${localProperties.getProperty("STREETLIGHT_API_ENDPOINT", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "STREETLIGHT_API_KEY",
+                "\"${localProperties.getProperty("STREETLIGHT_API_KEY", "")}\""
+            )
         }
         release {
             isMinifyEnabled = false
@@ -47,6 +72,31 @@ android {
                 "String",
                 "TMAP_API_KEY",
                 "\"${localProperties.getProperty("TMAP_API_KEY", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "CCTV_API_ENDPOINT",
+                "\"${localProperties.getProperty("CCTV_API_ENDPOINT", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "CCTV_API_KEY",
+                "\"${localProperties.getProperty("CCTV_API_KEY", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "CCTV_CRIME_PREVENTION_API_ENDPOINT",
+                "\"${localProperties.getProperty("CCTV_CRIME_PREVENTION_API_ENDPOINT", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "STREETLIGHT_API_ENDPOINT",
+                "\"${localProperties.getProperty("STREETLIGHT_API_ENDPOINT", "")}\""
+            )
+            buildConfigField(
+                "String",
+                "STREETLIGHT_API_KEY",
+                "\"${localProperties.getProperty("STREETLIGHT_API_KEY", "")}\""
             )
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

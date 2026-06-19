@@ -31,6 +31,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 
+private const val SHOW_SERVER_CONTROLS = false
+
 @Composable
 fun HomeRoute(
     onStartTripClick: () -> Unit,
@@ -111,18 +113,20 @@ fun HomeScreen(
                     Text(text = uiState.lastDestinationLabel)
                 }
             }
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(text = "AI 서버 안전 상태")
-                    Text(text = signalPollingUiState.statusMessage)
-                    signalPollingUiState.latestStatus?.let {
-                        Text(text = "현재 상태: $it")
-                    }
-                    signalPollingUiState.serverMessage?.let {
-                        Text(text = it)
+            if (SHOW_SERVER_CONTROLS) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(text = "AI 서버 안전 상태")
+                        Text(text = signalPollingUiState.statusMessage)
+                        signalPollingUiState.latestStatus?.let {
+                            Text(text = "현재 상태: $it")
+                        }
+                        signalPollingUiState.serverMessage?.let {
+                            Text(text = it)
+                        }
                     }
                 }
             }
@@ -143,11 +147,13 @@ fun HomeScreen(
             ) {
                 Text("보호자 설정")
             }
-            OutlinedButton(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = onServerSettingsClick
-            ) {
-                Text("서버 설정")
+            if (SHOW_SERVER_CONTROLS) {
+                OutlinedButton(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onServerSettingsClick
+                ) {
+                    Text("서버 설정")
+                }
             }
         }
     }

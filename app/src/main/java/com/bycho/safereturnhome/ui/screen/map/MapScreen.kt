@@ -20,6 +20,7 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Looper
 import android.os.Build
+import android.os.Handler
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -41,6 +42,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -84,8 +86,13 @@ import androidx.core.os.CancellationSignal
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bycho.safereturnhome.BuildConfig
 import com.bycho.safereturnhome.R
+import com.bycho.safereturnhome.data.CctvCoordinate
+import com.bycho.safereturnhome.data.CctvRepository
+import com.bycho.safereturnhome.data.CctvSafeRoutePlanner
 import com.bycho.safereturnhome.data.GuardianPreferences
 import com.bycho.safereturnhome.data.RecentDestinationPreferences
+import com.bycho.safereturnhome.data.StreetlightCoordinate
+import com.bycho.safereturnhome.data.StreetlightRepository
 import com.bycho.safereturnhome.data.guardianPhoneNumberError
 import com.bycho.safereturnhome.ui.state.DestinationSearchResult
 import com.bycho.safereturnhome.ui.state.MapUiState
@@ -96,6 +103,8 @@ import com.skt.tmap.TMapView
 import com.skt.tmap.overlay.TMapCircle
 import com.skt.tmap.overlay.TMapMarkerItem
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.hypot
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
@@ -108,6 +117,8 @@ private const val CURRENT_LOCATION_ACCURACY_CIRCLE_ID = "current-location-accura
 private const val CURRENT_LOCATION_MARKER_ID = "current-location-marker"
 private const val DESTINATION_MARKER_ID = "destination-marker"
 private const val PEDESTRIAN_ROUTE_ID = "pedestrian-route"
+private const val ROUTE_CCTV_MARKER_ID_PREFIX = "route-cctv-"
+private const val ROUTE_STREETLIGHT_MARKER_ID_PREFIX = "route-streetlight-"
 private const val LOCATION_UPDATE_INTERVAL_MILLIS = 2_500L
 private const val LOCATION_UPDATE_DISTANCE_METERS = 3f
 private const val MIN_HEADING_CHANGE_DEGREES = 2f
@@ -121,10 +132,22 @@ private const val GUIDANCE_NEAR_ANNOUNCEMENT_METERS = 30
 private const val GUIDANCE_TURN_REFERENCE_DISTANCE_METERS = 18f
 private const val GUIDANCE_MIN_TURN_DEGREES = 35f
 private const val GUIDANCE_MIN_STEP_SPACING_METERS = 25f
+private const val MAX_CCTV_WAYPOINT_COUNT = 3
+private const val MIN_RELEVANT_CCTV_COORDINATE_COUNT_FOR_A_STAR = 12
+private const val ROUTE_CCTV_MARKER_RADIUS_METERS = 180f
+private const val ROUTE_CCTV_MARKER_CLEAR_LIMIT = 1_000
+private const val ROUTE_STREETLIGHT_MARKER_RADIUS_METERS = 180f
+private const val ROUTE_STREETLIGHT_MARKER_CLEAR_LIMIT = 2_000
+private const val METERS_PER_LATITUDE_DEGREE = 111_320.0
 private const val SOS_COUNTDOWN_SECONDS = 5
 private const val SOS_HOLD_DURATION_MILLIS = 3_000L
 private const val SOS_SMS_SENT_ACTION = "com.bycho.safereturnhome.SOS_SMS_SENT"
 private const val SOS_SMS_REQUEST_ID_KEY = "sos-sms-request-id"
+
+private enum class RouteMode {
+    GENERAL,
+    CCTV_SAFE
+}
 
 private class MapRenderState {
     var centeredLatitude: Double? = null
@@ -141,6 +164,33 @@ private class MapRenderState {
 private data class RemainingRouteMetrics(
     val remainingDistanceMeters: Int,
     val distanceFromRouteMeters: Float
+)
+
+private data class CctvSafeRouteAnalysis(
+    val generalDistanceMeters: Int?,
+    val safeDistanceMeters: Int?,
+    val candidateCctvCount: Int,
+    val selectedWaypointCount: Int,
+    val routeCctvCount: Int?,
+    val routeStreetlightLampCount: Int?,
+    val routeStreetlightLocationCount: Int?,
+    val estimatedCoverageRatio: Double,
+    val estimatedStreetlightCoverageRatio: Double?
+)
+
+private fun CctvSafeRouteAnalysis.mergeWith(
+    update: CctvSafeRouteAnalysis
+): CctvSafeRouteAnalysis {
+    return update.copy(
+        routeCctvCount = update.routeCctvCount ?: routeCctvCount,
+        routeStreetlightLampCount = update.routeStreetlightLampCount ?: routeStreetlightLampCount,
+        routeStreetlightLocationCount = update.routeStreetlightLocationCount ?: routeStreetlightLocationCount
+    )
+}
+
+private data class FlatPoint(
+    val x: Double,
+    val y: Double
 )
 
 private data class RouteGuidanceStep(
@@ -177,6 +227,7 @@ fun MapRoute(
         onDestinationSearchFailed = viewModel::onDestinationSearchFailed,
         onDestinationSelected = viewModel::onDestinationSelected,
         onRouteSearchStarted = viewModel::onRouteSearchStarted,
+        onRouteSearchProgress = viewModel::onRouteSearchProgress,
         onRouteSearchCompleted = viewModel::onRouteSearchCompleted,
         onRouteSearchFailed = viewModel::onRouteSearchFailed,
         onRemainingRouteDistanceChanged = viewModel::onRemainingRouteDistanceChanged,
@@ -202,6 +253,7 @@ fun MapScreen(
     onDestinationSearchFailed: (String) -> Unit,
     onDestinationSelected: (DestinationSearchResult) -> Unit,
     onRouteSearchStarted: () -> Unit,
+    onRouteSearchProgress: (String) -> Unit,
     onRouteSearchCompleted: (Int) -> Unit,
     onRouteSearchFailed: (String) -> Unit,
     onRemainingRouteDistanceChanged: (Int) -> Unit,
@@ -215,6 +267,7 @@ fun MapScreen(
     var recenterRequestId by remember { mutableIntStateOf(0) }
     var destinationFocusRequestId by remember { mutableIntStateOf(0) }
     var routeSearchRequestId by remember { mutableIntStateOf(0) }
+    var selectedRouteMode by remember { mutableStateOf(RouteMode.GENERAL) }
     var isFollowingCurrentLocation by remember { mutableStateOf(true) }
     var isNavigationMode by remember { mutableStateOf(false) }
     var isNorthUpMode by remember { mutableStateOf(false) }
@@ -222,6 +275,8 @@ fun MapScreen(
     var tMapView by remember { mutableStateOf<TMapView?>(null) }
     var textToSpeech by remember { mutableStateOf<TextToSpeech?>(null) }
     var activeRoutePoints by remember { mutableStateOf<List<TMapPoint>>(emptyList()) }
+    var activeCctvWaypointCount by remember { mutableIntStateOf(0) }
+    var activeCctvRouteAnalysis by remember { mutableStateOf<CctvSafeRouteAnalysis?>(null) }
     var routeGuidanceSteps by remember { mutableStateOf<List<RouteGuidanceStep>>(emptyList()) }
     var currentGuidanceStepIndex by remember { mutableIntStateOf(0) }
     var announcedGuidanceStepIndex by remember { mutableIntStateOf(-1) }
@@ -571,6 +626,8 @@ fun MapScreen(
                             isRouteRecalculationInProgress = false
                             consecutiveRouteDeviationCount = 0
                             activeRoutePoints = emptyList()
+                            activeCctvWaypointCount = 0
+                            activeCctvRouteAnalysis = null
                             routeGuidanceSteps = emptyList()
                             currentGuidanceStepIndex = 0
                             announcedGuidanceStepIndex = -1
@@ -659,6 +716,7 @@ fun MapScreen(
                     destination = uiState.selectedDestination,
                     destinationFocusRequestId = destinationFocusRequestId,
                     routeSearchRequestId = routeSearchRequestId,
+                    routeMode = selectedRouteMode,
                     isFollowingCurrentLocation = isFollowingCurrentLocation,
                     onMapInteraction = { isFollowingCurrentLocation = false },
                     onMapReady = onMapReady,
@@ -667,6 +725,10 @@ fun MapScreen(
                     onRouteSearchCompleted = { distanceMeters ->
                         val isFirstRouteSearch = !isNavigationMode
                         isRouteRecalculationInProgress = false
+                        if (selectedRouteMode == RouteMode.GENERAL) {
+                            activeCctvWaypointCount = 0
+                            activeCctvRouteAnalysis = null
+                        }
                         onRouteSearchCompleted(distanceMeters)
                         isNavigationMode = true
                         if (isFirstRouteSearch) {
@@ -674,8 +736,18 @@ fun MapScreen(
                             vibrateNavigationStarted(context)
                         }
                     },
+                    onRouteSearchProgress = onRouteSearchProgress,
+                    onCctvWaypointCountChanged = { activeCctvWaypointCount = it },
+                    onCctvRouteAnalysisChanged = { analysis ->
+                        activeCctvRouteAnalysis = if (analysis == null) {
+                            null
+                        } else {
+                            activeCctvRouteAnalysis?.mergeWith(analysis) ?: analysis
+                        }
+                    },
                     onRouteSearchFailed = { reason ->
                         isRouteRecalculationInProgress = false
+                        activeCctvRouteAnalysis = null
                         onRouteSearchFailed(reason)
                     },
                     onRoutePointsChanged = { activeRoutePoints = it },
@@ -734,6 +806,17 @@ fun MapScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(text = uiState.routeSummary)
+                    if (isNavigationMode && selectedRouteMode == RouteMode.CCTV_SAFE) {
+                        activeCctvRouteAnalysis?.let { analysis ->
+                            CctvSafeRouteAnalysisSummary(analysis)
+                        } ?: Text(
+                            text = if (activeCctvWaypointCount > 0) {
+                                "CCTV·가로등 참고 경로: 경로 주변 CCTV ${activeCctvWaypointCount}곳을 표시했습니다."
+                            } else {
+                                "CCTV·가로등 참고 경로: A* 분석 결과 추가 우회가 필요하지 않습니다."
+                            }
+                        )
+                    }
                     if (isNavigationMode) {
                         LinearProgressIndicator(
                             progress = { uiState.routeProgress },
@@ -816,6 +899,45 @@ fun MapScreen(
                     Text("경로 안내 종료")
                 }
             } else {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "경로 유형",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            RouteModeButton(
+                                modifier = Modifier.weight(1f),
+                                text = "일반 경로",
+                                isSelected = selectedRouteMode == RouteMode.GENERAL,
+                                onClick = {
+                                    selectedRouteMode = RouteMode.GENERAL
+                                    activeCctvWaypointCount = 0
+                                    activeCctvRouteAnalysis = null
+                                }
+                            )
+                            RouteModeButton(
+                                modifier = Modifier.weight(1f),
+                                text = "CCTV·가로등",
+                                isSelected = selectedRouteMode == RouteMode.CCTV_SAFE,
+                                onClick = { selectedRouteMode = RouteMode.CCTV_SAFE }
+                            )
+                        }
+                        Text(
+                            text = if (selectedRouteMode == RouteMode.GENERAL) {
+                                "거리 중심의 일반 보행 경로를 안내합니다."
+                            } else {
+                                "CCTV와 가로등 공공데이터를 참고해 인접 구간을 우선 반영합니다."
+                            }
+                        )
+                    }
+                }
                 Button(
                     modifier = Modifier.fillMaxWidth(),
                     enabled = uiState.currentLatitude != null &&
@@ -823,11 +945,19 @@ fun MapScreen(
                         uiState.selectedDestination != null &&
                         !uiState.isRouteSearchInProgress,
                     onClick = {
+                        activeCctvWaypointCount = 0
+                        activeCctvRouteAnalysis = null
                         onRouteSearchStarted()
                         routeSearchRequestId += 1
                     }
                 ) {
-                    Text("이 경로로 시작")
+                    Text(
+                        if (uiState.isRouteSearchInProgress) {
+                            "경로 준비 중..."
+                        } else {
+                            "이 경로로 시작"
+                        }
+                    )
                 }
             }
         }
@@ -1038,12 +1168,16 @@ private fun TMapViewContainer(
     destination: DestinationSearchResult?,
     destinationFocusRequestId: Int,
     routeSearchRequestId: Int,
+    routeMode: RouteMode,
     isFollowingCurrentLocation: Boolean,
     onMapInteraction: () -> Unit,
     onMapReady: () -> Unit,
     onApiKeyFailed: (String?) -> Unit,
     onMapViewCreated: (TMapView) -> Unit,
     onRouteSearchCompleted: (Int) -> Unit,
+    onRouteSearchProgress: (String) -> Unit,
+    onCctvWaypointCountChanged: (Int) -> Unit,
+    onCctvRouteAnalysisChanged: (CctvSafeRouteAnalysis?) -> Unit,
     onRouteSearchFailed: (String) -> Unit,
     onRoutePointsChanged: (List<TMapPoint>) -> Unit,
     onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
@@ -1193,18 +1327,148 @@ private fun TMapViewContainer(
                 destination != null
             ) {
                 renderState.routeSearchRequestId = routeSearchRequestId
-                findAndShowPedestrianRoute(
-                    view = view,
-                    startPoint = TMapPoint(latitude, longitude),
-                    destinationPoint = TMapPoint(destination.latitude, destination.longitude),
-                    onRouteSearchCompleted = onRouteSearchCompleted,
-                    onRouteSearchFailed = onRouteSearchFailed,
-                    onRoutePointsChanged = onRoutePointsChanged,
-                    onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged
-                )
+                val startPoint = TMapPoint(latitude, longitude)
+                val destinationPoint = TMapPoint(destination.latitude, destination.longitude)
+                when (routeMode) {
+                    RouteMode.GENERAL -> findAndShowPedestrianRoute(
+                        view = view,
+                        startPoint = startPoint,
+                        destinationPoint = destinationPoint,
+                        onRouteSearchCompleted = onRouteSearchCompleted,
+                        onRouteSearchFailed = onRouteSearchFailed,
+                        onRoutePointsChanged = onRoutePointsChanged,
+                        onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged
+                    ).also {
+                        clearRouteCctvMarkers(view)
+                        clearRouteStreetlightMarkers(view)
+                        onCctvWaypointCountChanged(0)
+                        onCctvRouteAnalysisChanged(null)
+                    }
+                    RouteMode.CCTV_SAFE -> findAndShowCctvSafeRoute(
+                        view = view,
+                        startPoint = startPoint,
+                        destinationPoint = destinationPoint,
+                        destinationAddress = destination.address,
+                        onRouteSearchCompleted = onRouteSearchCompleted,
+                        onRouteSearchProgress = onRouteSearchProgress,
+                        onCctvWaypointCountChanged = onCctvWaypointCountChanged,
+                        onCctvRouteAnalysisChanged = onCctvRouteAnalysisChanged,
+                        onRouteSearchFailed = onRouteSearchFailed,
+                        onRoutePointsChanged = onRoutePointsChanged,
+                        onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged
+                    )
+                }
             }
         }
     )
+}
+
+@Composable
+private fun RouteModeButton(
+    modifier: Modifier,
+    text: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    if (isSelected) {
+        Button(
+            modifier = modifier,
+            onClick = onClick
+        ) {
+            Text(text)
+        }
+    } else {
+        OutlinedButton(
+            modifier = modifier,
+            onClick = onClick
+        ) {
+            Text(text)
+        }
+    }
+}
+
+@Composable
+private fun CctvSafeRouteAnalysisSummary(
+    analysis: CctvSafeRouteAnalysis
+) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = "CCTV·가로등 참고 경로 분석",
+            style = MaterialTheme.typography.titleSmall
+        )
+        Text(
+            text = "일반 경로: ${formatDistance(analysis.generalDistanceMeters)} · " +
+                "참고 경로: ${formatDistance(analysis.safeDistanceMeters)}"
+        )
+        Text(
+            text = "경로 주변 CCTV: ${formatCount(analysis.routeCctvCount)} · " +
+                "분석 후보: ${analysis.candidateCctvCount}곳"
+        )
+        Text(
+            text = "경로 주변 가로등: ${formatStreetlightCount(
+                lampCount = analysis.routeStreetlightLampCount,
+                locationCount = analysis.routeStreetlightLocationCount
+            )}"
+        )
+        Text(text = "CCTV 인접도 추정: ${analysis.coveragePercent()}%")
+        Text(text = "가로등 인접도 추정: ${analysis.streetlightCoveragePercent()}")
+        Text(text = analysis.explanation())
+    }
+}
+
+private fun formatDistance(distanceMeters: Int?): String {
+    if (distanceMeters == null) return "비교 불가"
+    return if (distanceMeters >= 1_000) {
+        String.format(Locale.KOREAN, "%.1fkm", distanceMeters / 1_000.0)
+    } else {
+        "${distanceMeters}m"
+    }
+}
+
+private fun formatCount(count: Int?): String {
+    return count?.let { "${it}곳" } ?: "계산 중"
+}
+
+private fun formatStreetlightCount(lampCount: Int?, locationCount: Int?): String {
+    if (lampCount == null || locationCount == null) return "계산 중"
+    return "${lampCount}등 (${locationCount}지점)"
+}
+
+private fun CctvSafeRouteAnalysis.coveragePercent(): Int {
+    return (estimatedCoverageRatio * 100).toInt().coerceIn(0, 100)
+}
+
+private fun CctvSafeRouteAnalysis.streetlightCoveragePercent(): String {
+    return estimatedStreetlightCoverageRatio
+        ?.let { "${(it * 100).toInt().coerceIn(0, 100)}%" }
+        ?: "계산 중"
+}
+
+private fun CctvSafeRouteAnalysis.detourDistanceMeters(): Int? {
+    val generalDistance = generalDistanceMeters ?: return null
+    val safeDistance = safeDistanceMeters ?: return null
+    return safeDistance - generalDistance
+}
+
+private fun CctvSafeRouteAnalysis.explanation(): String {
+    if (selectedWaypointCount == 0) {
+        return "일반 경로도 CCTV 인접 후보가 충분해 추가 우회 없이 안내합니다."
+    }
+    val detourDistance = detourDistanceMeters()
+        ?: return "CCTV와 가로등이 가까운 구간을 우선해 참고 경로를 구성했습니다."
+    return when {
+        detourDistance > 80 -> {
+            "공공데이터 인접도를 우선해 일반 경로보다 약 ${formatDistance(detourDistance)} 우회합니다."
+        }
+        detourDistance >= 0 -> {
+            "거리 차이가 크지 않아 CCTV와 가로등이 가까운 길을 우선합니다."
+        }
+        else -> {
+            "거리 손해 없이 CCTV와 가로등이 가까운 길을 선택했습니다."
+        }
+    }
 }
 
 private fun createCurrentLocationIcon(bearingDegrees: Float): Bitmap {
@@ -1278,6 +1542,310 @@ private fun createDestinationIcon(): Bitmap {
     return bitmap
 }
 
+private fun showRouteCctvMarkers(
+    view: TMapView,
+    routePoints: List<TMapPoint>,
+    coordinates: List<CctvCoordinate>
+): List<CctvCoordinate> {
+    clearRouteCctvMarkers(view)
+    if (routePoints.isEmpty()) return emptyList()
+    val routeCctvCoordinates = coordinates
+        .distinctBy(CctvCoordinate::address)
+        .filter { coordinate ->
+            isCoordinateNearRoute(
+                coordinate = coordinate,
+                routePoints = routePoints,
+                radiusMeters = ROUTE_CCTV_MARKER_RADIUS_METERS
+            )
+        }
+        .sortedBy { coordinate ->
+            routePoints.indexOfNearestRoutePoint(coordinate)
+        }
+    routeCctvCoordinates.forEachIndexed { index, coordinate ->
+        view.addTMapMarkerItem(
+            TMapMarkerItem().apply {
+                setId("$ROUTE_CCTV_MARKER_ID_PREFIX$index")
+                setTMapPoint(TMapPoint(coordinate.latitude, coordinate.longitude))
+                setIcon(createRouteCctvIcon())
+                setPosition(0.5f, 0.5f)
+                setCalloutTitle("경로 주변 CCTV ${index + 1}")
+                setCalloutSubTitle("카메라 ${coordinate.cameraCount}대")
+                setCanShowCallout(true)
+                setVisible(true)
+            }
+        )
+    }
+    return routeCctvCoordinates
+}
+
+private fun showRouteStreetlightMarkers(
+    view: TMapView,
+    routePoints: List<TMapPoint>,
+    coordinates: List<StreetlightCoordinate>
+): List<StreetlightCoordinate> {
+    clearRouteStreetlightMarkers(view)
+    if (routePoints.isEmpty()) return emptyList()
+    val routeStreetlightCoordinates = coordinates
+        .distinctBy { coordinate ->
+            Triple(coordinate.latitude, coordinate.longitude, coordinate.address)
+        }
+        .filter { coordinate ->
+            isStreetlightNearRoute(
+                coordinate = coordinate,
+                routePoints = routePoints,
+                radiusMeters = ROUTE_STREETLIGHT_MARKER_RADIUS_METERS
+            )
+        }
+        .sortedBy { coordinate ->
+            routePoints.indexOfNearestRoutePoint(coordinate)
+        }
+    routeStreetlightCoordinates.forEachIndexed { index, coordinate ->
+        val fixtureText = coordinate.fixtureType.takeIf(String::isNotBlank)
+            ?.let { " · $it" }
+            .orEmpty()
+        view.addTMapMarkerItem(
+            TMapMarkerItem().apply {
+                setId("$ROUTE_STREETLIGHT_MARKER_ID_PREFIX$index")
+                setTMapPoint(TMapPoint(coordinate.latitude, coordinate.longitude))
+                setIcon(createRouteStreetlightIcon())
+                setPosition(0.5f, 0.5f)
+                setCalloutTitle("경로 주변 가로등 ${index + 1}")
+                setCalloutSubTitle("총 ${coordinate.lightCount}등$fixtureText")
+                setCanShowCallout(true)
+                setVisible(true)
+            }
+        )
+    }
+    return routeStreetlightCoordinates
+}
+
+private fun refreshRouteCctvMarkers(
+    view: TMapView,
+    routePoints: List<TMapPoint>,
+    addressHints: List<String>,
+    analysis: CctvSafeRouteAnalysis,
+    onCctvWaypointCountChanged: (Int) -> Unit,
+    onCctvRouteAnalysisChanged: (CctvSafeRouteAnalysis?) -> Unit
+) {
+    CctvRepository(view.context).loadCoordinates(
+        addressHints = addressHints,
+        hasEnoughCoordinates = { false },
+        onProgress = {},
+        onCompleted = { refreshedCoordinates ->
+            val routeCctvCoordinates = showRouteCctvMarkers(
+                view = view,
+                routePoints = routePoints,
+                coordinates = refreshedCoordinates
+            )
+            onCctvWaypointCountChanged(routeCctvCoordinates.size)
+            onCctvRouteAnalysisChanged(
+                analysis.copy(routeCctvCount = routeCctvCoordinates.size)
+            )
+        },
+        onFailed = {
+            // Initial route markers are already shown; this background refresh is best-effort.
+        },
+        stopWhenEnoughCoordinates = false,
+        maxGeocodingAttempts = Int.MAX_VALUE
+    )
+}
+
+private fun clearRouteCctvMarkers(view: TMapView) {
+    repeat(ROUTE_CCTV_MARKER_CLEAR_LIMIT) { index ->
+        view.removeTMapMarkerItem("$ROUTE_CCTV_MARKER_ID_PREFIX$index")
+    }
+}
+
+private fun clearRouteStreetlightMarkers(view: TMapView) {
+    repeat(ROUTE_STREETLIGHT_MARKER_CLEAR_LIMIT) { index ->
+        view.removeTMapMarkerItem("$ROUTE_STREETLIGHT_MARKER_ID_PREFIX$index")
+    }
+}
+
+private fun createRouteCctvIcon(): Bitmap {
+    val size = 48
+    val center = size / 2f
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    val cctvPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(46, 125, 50)
+        style = Paint.Style.FILL
+    }
+    canvas.drawCircle(center, center, 20f, outlinePaint)
+    canvas.drawCircle(center, center, 16f, cctvPaint)
+    canvas.drawRect(13f, 19f, 35f, 29f, outlinePaint)
+    canvas.drawCircle(30f, center, 4f, cctvPaint)
+    return bitmap
+}
+
+private fun createRouteStreetlightIcon(): Bitmap {
+    val size = 48
+    val center = size / 2f
+    val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    val lampPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(255, 193, 7)
+        style = Paint.Style.FILL
+    }
+    val polePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(245, 124, 0)
+        style = Paint.Style.FILL
+        strokeWidth = 4f
+        strokeCap = Paint.Cap.ROUND
+    }
+    canvas.drawCircle(center, center, 20f, outlinePaint)
+    canvas.drawCircle(center, 15f, 9f, lampPaint)
+    canvas.drawLine(center, 23f, center, 37f, polePaint)
+    canvas.drawLine(center, 24f, 15f, 30f, polePaint)
+    canvas.drawLine(17f, 38f, 31f, 38f, polePaint)
+    return bitmap
+}
+
+private fun isCoordinateNearRoute(
+    coordinate: CctvCoordinate,
+    routePoints: List<TMapPoint>,
+    radiusMeters: Float
+): Boolean {
+    return distanceFromCoordinateToRouteMeters(
+        latitude = coordinate.latitude,
+        longitude = coordinate.longitude,
+        routePoints = routePoints
+    ) <= radiusMeters
+}
+
+private fun isStreetlightNearRoute(
+    coordinate: StreetlightCoordinate,
+    routePoints: List<TMapPoint>,
+    radiusMeters: Float
+): Boolean {
+    return distanceFromCoordinateToRouteMeters(
+        latitude = coordinate.latitude,
+        longitude = coordinate.longitude,
+        routePoints = routePoints
+    ) <= radiusMeters
+}
+
+private fun List<TMapPoint>.indexOfNearestRoutePoint(coordinate: CctvCoordinate): Int {
+    return indexOfNearestRoutePoint(
+        latitude = coordinate.latitude,
+        longitude = coordinate.longitude
+    )
+}
+
+private fun List<TMapPoint>.indexOfNearestRoutePoint(coordinate: StreetlightCoordinate): Int {
+    return indexOfNearestRoutePoint(
+        latitude = coordinate.latitude,
+        longitude = coordinate.longitude
+    )
+}
+
+private fun List<TMapPoint>.indexOfNearestRoutePoint(latitude: Double, longitude: Double): Int {
+    return indices.minByOrNull { index ->
+        val routePoint = this[index]
+        calculateDistanceMeters(
+            startLatitude = latitude,
+            startLongitude = longitude,
+            endLatitude = routePoint.latitude,
+            endLongitude = routePoint.longitude
+        )
+    } ?: Int.MAX_VALUE
+}
+
+private fun distanceFromCoordinateToRouteMeters(
+    latitude: Double,
+    longitude: Double,
+    routePoints: List<TMapPoint>
+): Double {
+    if (routePoints.isEmpty()) return Double.MAX_VALUE
+    if (routePoints.size == 1) {
+        val routePoint = routePoints.first()
+        return calculateDistanceMeters(
+            startLatitude = latitude,
+            startLongitude = longitude,
+            endLatitude = routePoint.latitude,
+            endLongitude = routePoint.longitude
+        ).toDouble()
+    }
+    val averageLatitude = (
+        latitude +
+            routePoints.first().latitude +
+            routePoints.last().latitude
+        ) / 3.0
+    val coordinatePoint = projectToFlatPoint(
+        latitude = latitude,
+        longitude = longitude,
+        originLatitude = latitude,
+        originLongitude = longitude,
+        averageLatitude = averageLatitude
+    )
+    return routePoints
+        .zipWithNext()
+        .minOf { (startPoint, endPoint) ->
+            distanceFromPointToSegment(
+                point = coordinatePoint,
+                segmentStart = projectToFlatPoint(
+                    latitude = startPoint.latitude,
+                    longitude = startPoint.longitude,
+                    originLatitude = latitude,
+                    originLongitude = longitude,
+                    averageLatitude = averageLatitude
+                ),
+                segmentEnd = projectToFlatPoint(
+                    latitude = endPoint.latitude,
+                    longitude = endPoint.longitude,
+                    originLatitude = latitude,
+                    originLongitude = longitude,
+                    averageLatitude = averageLatitude
+                )
+            )
+        }
+}
+
+private fun projectToFlatPoint(
+    latitude: Double,
+    longitude: Double,
+    originLatitude: Double,
+    originLongitude: Double,
+    averageLatitude: Double
+): FlatPoint {
+    val longitudeMetersPerDegree = METERS_PER_LATITUDE_DEGREE * cos(Math.toRadians(averageLatitude))
+    return FlatPoint(
+        x = (longitude - originLongitude) * longitudeMetersPerDegree,
+        y = (latitude - originLatitude) * METERS_PER_LATITUDE_DEGREE
+    )
+}
+
+private fun distanceFromPointToSegment(
+    point: FlatPoint,
+    segmentStart: FlatPoint,
+    segmentEnd: FlatPoint
+): Double {
+    val segmentX = segmentEnd.x - segmentStart.x
+    val segmentY = segmentEnd.y - segmentStart.y
+    val segmentLengthSquared = segmentX * segmentX + segmentY * segmentY
+    if (segmentLengthSquared <= 0.0) {
+        return hypot(point.x - segmentStart.x, point.y - segmentStart.y)
+    }
+    val projection = (
+        (point.x - segmentStart.x) * segmentX +
+            (point.y - segmentStart.y) * segmentY
+        ) / segmentLengthSquared
+    val clampedProjection = projection.coerceIn(0.0, 1.0)
+    val closestPoint = FlatPoint(
+        x = segmentStart.x + segmentX * clampedProjection,
+        y = segmentStart.y + segmentY * clampedProjection
+    )
+    return hypot(point.x - closestPoint.x, point.y - closestPoint.y)
+}
+
 private fun createCurrentLocationAccuracyCircle(
     latitude: Double,
     longitude: Double,
@@ -1302,7 +1870,8 @@ private fun findAndShowPedestrianRoute(
     onRouteSearchCompleted: (Int) -> Unit,
     onRouteSearchFailed: (String) -> Unit,
     onRoutePointsChanged: (List<TMapPoint>) -> Unit,
-    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit,
+    onRouteShown: ((List<TMapPoint>, Int) -> Unit)? = null
 ) {
     findRouteGuidanceSteps(
         view = view,
@@ -1318,32 +1887,15 @@ private fun findAndShowPedestrianRoute(
             object : TMapData.OnFindPathDataWithTypeListener {
                 override fun onFindPathDataWithType(polyLine: com.skt.tmap.overlay.TMapPolyLine?) {
                     view.post {
-                        if (polyLine == null || polyLine.linePointList.isEmpty()) {
-                            onRouteSearchFailed("경로 검색 결과가 없습니다")
-                            return@post
-                        }
-                        runCatching {
-                            polyLine.setID(PEDESTRIAN_ROUTE_ID)
-                            polyLine.setLineColor(Color.rgb(33, 150, 243))
-                            polyLine.setLineWidth(8f)
-                            polyLine.setLineAlpha(220)
-                            view.removeTMapPath()
-                            view.setTMapPath(polyLine)
-                            view.fitBounds(view.getBoundsFromPoints(polyLine.linePointList))
-                            onRoutePointsChanged(polyLine.linePointList.toList())
-                            val fallbackGuidanceSteps =
-                                deriveRouteGuidanceSteps(polyLine.linePointList)
-                            Log.i(
-                                TMAP_LOG_TAG,
-                                "Generated ${fallbackGuidanceSteps.size} guidance steps " +
-                                    "from the pedestrian route polyline."
-                            )
-                            onRouteGuidanceStepsChanged(fallbackGuidanceSteps)
-                            onRouteSearchCompleted(calculatePolylineDistanceMeters(polyLine))
-                        }.onFailure { error ->
-                            Log.e(TMAP_LOG_TAG, "Failed to show pedestrian route.", error)
-                            onRouteSearchFailed(error.message ?: "unknown error")
-                        }
+                        showPedestrianRoute(
+                            view = view,
+                            polyLine = polyLine,
+                            onRouteSearchCompleted = onRouteSearchCompleted,
+                            onRouteSearchFailed = onRouteSearchFailed,
+                            onRoutePointsChanged = onRoutePointsChanged,
+                            onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged,
+                            onRouteShown = onRouteShown
+                        )
                     }
                 }
             }
@@ -1353,6 +1905,352 @@ private fun findAndShowPedestrianRoute(
         view.post {
             onRouteSearchFailed(error.message ?: "unknown error")
         }
+    }
+}
+
+private fun findPedestrianRouteDistance(
+    view: TMapView,
+    startPoint: TMapPoint,
+    destinationPoint: TMapPoint,
+    onCompleted: (Int?) -> Unit
+) {
+    runCatching {
+        TMapData().findPathDataWithType(
+            TMapData.TMapPathType.PEDESTRIAN_PATH,
+            startPoint,
+            destinationPoint,
+            object : TMapData.OnFindPathDataWithTypeListener {
+                override fun onFindPathDataWithType(polyLine: com.skt.tmap.overlay.TMapPolyLine?) {
+                    view.post {
+                        onCompleted(polyLine?.takeIf { it.linePointList.isNotEmpty() }
+                            ?.let(::calculatePolylineDistanceMeters))
+                    }
+                }
+            }
+        )
+    }.onFailure { error ->
+        Log.w(TMAP_LOG_TAG, "Failed to calculate baseline pedestrian route distance.", error)
+        view.post { onCompleted(null) }
+    }
+}
+
+private fun findAndShowCctvSafeRoute(
+    view: TMapView,
+    startPoint: TMapPoint,
+    destinationPoint: TMapPoint,
+    destinationAddress: String,
+    onRouteSearchCompleted: (Int) -> Unit,
+    onRouteSearchProgress: (String) -> Unit,
+    onCctvWaypointCountChanged: (Int) -> Unit,
+    onCctvRouteAnalysisChanged: (CctvSafeRouteAnalysis?) -> Unit,
+    onRouteSearchFailed: (String) -> Unit,
+    onRoutePointsChanged: (List<TMapPoint>) -> Unit,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
+) {
+    onRouteSearchProgress("일반 경로 기준 거리를 확인하는 중입니다.")
+    findPedestrianRouteDistance(
+        view = view,
+        startPoint = startPoint,
+        destinationPoint = destinationPoint
+    ) { generalDistanceMeters ->
+        onRouteSearchProgress("현재 위치 주변 CCTV를 찾는 중입니다.")
+        findAddressForPoint(startPoint) { startAddress ->
+            findAndShowCctvSafeRoute(
+                view = view,
+                startPoint = startPoint,
+                destinationPoint = destinationPoint,
+                destinationAddress = destinationAddress,
+                startAddress = startAddress,
+                generalDistanceMeters = generalDistanceMeters,
+                onRouteSearchCompleted = onRouteSearchCompleted,
+                onRouteSearchProgress = onRouteSearchProgress,
+                onCctvWaypointCountChanged = onCctvWaypointCountChanged,
+                onCctvRouteAnalysisChanged = onCctvRouteAnalysisChanged,
+                onRouteSearchFailed = onRouteSearchFailed,
+                onRoutePointsChanged = onRoutePointsChanged,
+                onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged
+            )
+        }
+    }
+}
+
+private fun findAndShowCctvSafeRoute(
+    view: TMapView,
+    startPoint: TMapPoint,
+    destinationPoint: TMapPoint,
+    destinationAddress: String,
+    startAddress: String,
+    generalDistanceMeters: Int?,
+    onRouteSearchCompleted: (Int) -> Unit,
+    onRouteSearchProgress: (String) -> Unit,
+    onCctvWaypointCountChanged: (Int) -> Unit,
+    onCctvRouteAnalysisChanged: (CctvSafeRouteAnalysis?) -> Unit,
+    onRouteSearchFailed: (String) -> Unit,
+    onRoutePointsChanged: (List<TMapPoint>) -> Unit,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
+) {
+    CctvRepository(view.context).loadCoordinates(
+        addressHints = listOf(startAddress, destinationAddress).filter(String::isNotBlank),
+        hasEnoughCoordinates = { coordinates ->
+            CctvSafeRoutePlanner.countRelevantCoordinates(
+                startLatitude = startPoint.latitude,
+                startLongitude = startPoint.longitude,
+                destinationLatitude = destinationPoint.latitude,
+                destinationLongitude = destinationPoint.longitude,
+                cctvCoordinates = coordinates
+            ) >= MIN_RELEVANT_CCTV_COORDINATE_COUNT_FOR_A_STAR
+        },
+        onProgress = onRouteSearchProgress,
+        onCompleted = { coordinates ->
+            val showPlanWithStreetlights = showPlan@{ streetlightCoordinates: List<StreetlightCoordinate> ->
+            val plan = CctvSafeRoutePlanner.plan(
+                startLatitude = startPoint.latitude,
+                startLongitude = startPoint.longitude,
+                destinationLatitude = destinationPoint.latitude,
+                destinationLongitude = destinationPoint.longitude,
+                cctvCoordinates = coordinates,
+                streetlightCoordinates = streetlightCoordinates,
+                maxWaypointCount = MAX_CCTV_WAYPOINT_COUNT
+            )
+            val waypoints = plan.waypoints
+            if (waypoints.isEmpty()) {
+                clearRouteCctvMarkers(view)
+                clearRouteStreetlightMarkers(view)
+                onCctvWaypointCountChanged(0)
+                if (plan.candidateCctvCount == 0) {
+                    onRouteSearchFailed("경로 주변 CCTV 좌표를 충분히 확보하지 못했습니다")
+                    return@showPlan
+                }
+                onRouteSearchProgress("A* 분석 결과 일반 경로에 추가 우회가 필요하지 않습니다.")
+                val analysis = CctvSafeRouteAnalysis(
+                    generalDistanceMeters = generalDistanceMeters,
+                    safeDistanceMeters = null,
+                    candidateCctvCount = plan.candidateCctvCount,
+                    selectedWaypointCount = 0,
+                    routeCctvCount = null,
+                    routeStreetlightLampCount = null,
+                    routeStreetlightLocationCount = null,
+                    estimatedCoverageRatio = plan.estimatedCoverageRatio,
+                    estimatedStreetlightCoverageRatio = plan.estimatedStreetlightCoverageRatio
+                )
+                onCctvRouteAnalysisChanged(analysis)
+                findAndShowPedestrianRoute(
+                    view = view,
+                    startPoint = startPoint,
+                    destinationPoint = destinationPoint,
+                    onRouteSearchCompleted = { distanceMeters ->
+                        onRouteSearchCompleted(distanceMeters)
+                    },
+                    onRouteSearchFailed = onRouteSearchFailed,
+                    onRoutePointsChanged = onRoutePointsChanged,
+                    onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged,
+                    onRouteShown = { routePoints, distanceMeters ->
+                        val routeCctvCoordinates = showRouteCctvMarkers(
+                            view = view,
+                            routePoints = routePoints,
+                            coordinates = coordinates
+                        )
+                        val routeStreetlightCoordinates = showRouteStreetlightMarkers(
+                            view = view,
+                            routePoints = routePoints,
+                            coordinates = streetlightCoordinates
+                        )
+                        onCctvWaypointCountChanged(routeCctvCoordinates.size)
+                        val updatedAnalysis = analysis.copy(
+                            generalDistanceMeters = generalDistanceMeters ?: distanceMeters,
+                            safeDistanceMeters = distanceMeters,
+                            routeCctvCount = routeCctvCoordinates.size,
+                            routeStreetlightLampCount = routeStreetlightCoordinates.sumOf { it.lightCount },
+                            routeStreetlightLocationCount = routeStreetlightCoordinates.size
+                        )
+                        onCctvRouteAnalysisChanged(updatedAnalysis)
+                        refreshRouteCctvMarkers(
+                            view = view,
+                            routePoints = routePoints,
+                            addressHints = listOf(startAddress, destinationAddress)
+                                .filter(String::isNotBlank),
+                            analysis = updatedAnalysis,
+                            onCctvWaypointCountChanged = onCctvWaypointCountChanged,
+                            onCctvRouteAnalysisChanged = onCctvRouteAnalysisChanged
+                        )
+                        onRouteSearchCompleted(distanceMeters)
+                    }
+                )
+                return@showPlan
+            }
+            clearRouteCctvMarkers(view)
+            clearRouteStreetlightMarkers(view)
+            onCctvWaypointCountChanged(0)
+            val analysis = CctvSafeRouteAnalysis(
+                generalDistanceMeters = generalDistanceMeters,
+                safeDistanceMeters = null,
+                candidateCctvCount = plan.candidateCctvCount,
+                selectedWaypointCount = waypoints.size,
+                routeCctvCount = null,
+                routeStreetlightLampCount = null,
+                routeStreetlightLocationCount = null,
+                estimatedCoverageRatio = plan.estimatedCoverageRatio,
+                estimatedStreetlightCoverageRatio = plan.estimatedStreetlightCoverageRatio
+            )
+            onCctvRouteAnalysisChanged(analysis)
+            onRouteSearchProgress("CCTV가 가까운 구간을 반영해 경로를 계산하는 중입니다.")
+            Log.i(
+                TMAP_LOG_TAG,
+                "Requesting A* CCTV safe route with ${waypoints.size} waypoints. " +
+                    "estimatedDistance=${plan.estimatedDistanceMeters}, " +
+                    "coverage=${plan.estimatedCoverageRatio}, " +
+                    "candidates=${plan.candidateCctvCount}"
+            )
+            runCatching {
+                TMapData().findPathDataWithType(
+                    TMapData.TMapPathType.PEDESTRIAN_PATH,
+                    startPoint,
+                    destinationPoint,
+                    ArrayList(waypoints.map { coordinate ->
+                        TMapPoint(coordinate.latitude, coordinate.longitude)
+                    }),
+                    0,
+                    object : TMapData.OnFindPathDataWithTypeListener {
+                        override fun onFindPathDataWithType(
+                            polyLine: com.skt.tmap.overlay.TMapPolyLine?
+                        ) {
+                            view.post {
+                                showPedestrianRoute(
+                                    view = view,
+                                    polyLine = polyLine,
+                                    onRouteSearchCompleted = { distanceMeters ->
+                                        onRouteSearchCompleted(distanceMeters)
+                                    },
+                                    onRouteSearchFailed = onRouteSearchFailed,
+                                    onRoutePointsChanged = onRoutePointsChanged,
+                                    onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged,
+                                    onRouteShown = { routePoints, distanceMeters ->
+                                        val routeCctvCoordinates = showRouteCctvMarkers(
+                                            view = view,
+                                            routePoints = routePoints,
+                                            coordinates = coordinates
+                                        )
+                                        val routeStreetlightCoordinates = showRouteStreetlightMarkers(
+                                            view = view,
+                                            routePoints = routePoints,
+                                            coordinates = streetlightCoordinates
+                                        )
+                                        onCctvWaypointCountChanged(routeCctvCoordinates.size)
+                                        val updatedAnalysis = analysis.copy(
+                                            safeDistanceMeters = distanceMeters,
+                                            routeCctvCount = routeCctvCoordinates.size,
+                                            routeStreetlightLampCount =
+                                                routeStreetlightCoordinates.sumOf { it.lightCount },
+                                            routeStreetlightLocationCount =
+                                                routeStreetlightCoordinates.size
+                                        )
+                                        onCctvRouteAnalysisChanged(updatedAnalysis)
+                                        refreshRouteCctvMarkers(
+                                            view = view,
+                                            routePoints = routePoints,
+                                            addressHints = listOf(startAddress, destinationAddress)
+                                                .filter(String::isNotBlank),
+                                            analysis = updatedAnalysis,
+                                            onCctvWaypointCountChanged = onCctvWaypointCountChanged,
+                                            onCctvRouteAnalysisChanged = onCctvRouteAnalysisChanged
+                                        )
+                                        onRouteSearchCompleted(distanceMeters)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                )
+            }.onFailure { error ->
+                Log.e(TMAP_LOG_TAG, "Failed to search CCTV safe route.", error)
+                view.post {
+                    onRouteSearchFailed(error.message ?: "CCTV·가로등 참고 경로를 검색하지 못했습니다")
+                }
+            }
+            }
+            onRouteSearchProgress("가로등 정보를 경로 점수에 반영하는 중입니다.")
+            StreetlightRepository(view.context).loadCoordinates(
+                onCompleted = showPlanWithStreetlights,
+                onFailed = { error ->
+                    Log.w(TMAP_LOG_TAG, "Failed to load streetlights for route scoring: $error")
+                    showPlanWithStreetlights(emptyList())
+                }
+            )
+        },
+        onFailed = onRouteSearchFailed
+    )
+}
+
+private fun findAddressForPoint(
+    point: TMapPoint,
+    onCompleted: (String) -> Unit
+) {
+    val mainHandler = Handler(Looper.getMainLooper())
+    var isCompleted = false
+    lateinit var timeout: Runnable
+
+    fun complete(address: String?) {
+        if (isCompleted) return
+        isCompleted = true
+        mainHandler.removeCallbacks(timeout)
+        onCompleted(address.orEmpty())
+    }
+
+    timeout = Runnable { complete(null) }
+    mainHandler.postDelayed(timeout, 1_500L)
+    runCatching {
+        TMapData().convertGpsToAddress(
+            point.latitude,
+            point.longitude,
+            object : TMapData.OnConvertGPSToAddressListener {
+                override fun onConverGPSToAddress(address: String?) {
+                    mainHandler.post { complete(address) }
+                }
+            }
+        )
+    }.onFailure {
+        complete(null)
+    }
+}
+
+private fun showPedestrianRoute(
+    view: TMapView,
+    polyLine: com.skt.tmap.overlay.TMapPolyLine?,
+    onRouteSearchCompleted: (Int) -> Unit,
+    onRouteSearchFailed: (String) -> Unit,
+    onRoutePointsChanged: (List<TMapPoint>) -> Unit,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit,
+    onRouteShown: ((List<TMapPoint>, Int) -> Unit)? = null
+) {
+    if (polyLine == null || polyLine.linePointList.isEmpty()) {
+        onRouteSearchFailed("경로 검색 결과가 없습니다")
+        return
+    }
+    runCatching {
+        polyLine.setID(PEDESTRIAN_ROUTE_ID)
+        polyLine.setLineColor(Color.rgb(33, 150, 243))
+        polyLine.setLineWidth(8f)
+        polyLine.setLineAlpha(220)
+        view.removeTMapPath()
+        view.setTMapPath(polyLine)
+        view.fitBounds(view.getBoundsFromPoints(polyLine.linePointList))
+        val routePoints = polyLine.linePointList.toList()
+        onRoutePointsChanged(routePoints)
+        val fallbackGuidanceSteps = deriveRouteGuidanceSteps(polyLine.linePointList)
+        Log.i(
+            TMAP_LOG_TAG,
+            "Generated ${fallbackGuidanceSteps.size} guidance steps from the pedestrian route polyline."
+        )
+        onRouteGuidanceStepsChanged(fallbackGuidanceSteps)
+        val distanceMeters = calculatePolylineDistanceMeters(polyLine)
+        if (onRouteShown != null) {
+            onRouteShown(routePoints, distanceMeters)
+        } else {
+            onRouteSearchCompleted(distanceMeters)
+        }
+    }.onFailure { error ->
+        Log.e(TMAP_LOG_TAG, "Failed to show pedestrian route.", error)
+        onRouteSearchFailed(error.message ?: "unknown error")
     }
 }
 

@@ -28,7 +28,15 @@
 
 ### 보행자 경로 안내
 
+- 경로 설정 화면에서 `일반 경로`와 `CCTV·가로등 참고 경로` 선택
 - TMap 보행자 경로 API를 이용한 실제 경로선 표시
+- CCTV·가로등 참고 경로 선택 시 구미시 학교 주변 및 생활방범 CCTV 좌표와 가로등 좌표를 참고한 보행 경로 표시
+- 현재 위치와 목적지 주변 CCTV 주소부터 병렬로 TMap 좌표로 변환하고 최대 `23시간` 동안 기기 내부에 캐시
+- CCTV 좌표, 출발지, 목적지로 후보 그래프를 만들고 CCTV 비보호 구간에 페널티를 주는 A* 탐색 실행
+- 가로등 인접도를 자체 휴리스틱 점수에 보조 반영해 같은 CCTV 후보 중 더 밝은 구간을 우선 선택
+- A*가 우회 허용 범위 안에서 선택한 CCTV 인접 지점을 최대 `3곳`까지 TMap 보행 경로 중간 좌표로 전달
+- 최종 경로선 주변 CCTV는 지도에 녹색 마커로 표시
+- 최종 경로선 기준 180m 안의 가로등은 지도에 노란색/주황색 마커로 표시
 - 안내 시작 후 지도 중심의 전용 안내 화면으로 전환
 - 현재 위치 기준 남은 경로 거리와 예상 도보 시간 갱신
 - 전체 경로 대비 진행률 바 표시
@@ -93,11 +101,16 @@ cd safe_return_home
 
 ### 2. `local.properties` 설정
 
-프로젝트 루트의 `local.properties` 파일에 Android SDK 경로와 TMap API 키를 설정합니다.
+프로젝트 루트의 `local.properties` 파일에 Android SDK 경로, TMap API 키, CCTV API 설정을 입력합니다.
 
 ```properties
 sdk.dir=C\:\\Users\\<YOUR_NAME>\\AppData\\Local\\Android\\Sdk
 TMAP_API_KEY=your_tmap_api_key
+CCTV_API_ENDPOINT=https://apis.data.go.kr/5080000/schulCfrCctvService/getSchulCfrCctv
+CCTV_CRIME_PREVENTION_API_ENDPOINT=https://apis.data.go.kr/5080000/lvlhCrmprvCctvService/getLvlhCrmprvCctv
+CCTV_API_KEY=your_public_data_api_key
+STREETLIGHT_API_ENDPOINT=https://api.odcloud.kr/api/15157590/v1/uddi:7265cf69-ea47-4608-ad58-e6640baf9371
+STREETLIGHT_API_KEY=your_public_data_api_key
 ```
 
 Windows의 `.properties` 파일에서는 드라이브 구분자와 경로 구분자를 이스케이프해야 합니다.
@@ -111,6 +124,7 @@ TMap 콘솔에서 현재 키에 필요한 기능이 활성화되어 있는지 �
 - 지도 보기
 - POI 검색
 - 보행자 경로 안내
+- 주소 검색
 
 권한이 없으면 지도 인증, 목적지 검색 또는 경로 조회가 실패할 수 있습니다.
 
@@ -146,6 +160,8 @@ $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 - 예상 도보 시간: 평균 보행 속도 약 `80m/분` 기준
 
 경로 안내 중 남은 거리는 매 위치 갱신마다 서버에 재요청하지 않습니다. 기존 경로선에서 현재 위치와 가장 가까운 지점을 찾고, 해당 지점부터 목적지까지의 경로 길이를 합산합니다. 경로를 벗어난 경우에만 TMap 보행자 경로 API를 다시 호출합니다.
+
+CCTV·가로등 참고 경로의 A* 탐색은 공공데이터의 CCTV 좌표를 기반으로 생성한 후보 그래프에서 실행됩니다. 가로등은 CCTV 후보 사이의 구간 비용을 낮추는 보조 선호값으로만 사용합니다. 공공데이터에 실제 보행 도로 노드와 간선이 포함되어 있지 않으므로, A*가 고른 CCTV 인접 지점 사이의 실제 보행 경로선은 TMap 보행 경로 API가 계산합니다. 이 경로는 공공데이터 기반 참고 경로이며 실제 안전을 보장하는 공식 점수가 아닙니다.
 
 ## Android 권한
 
