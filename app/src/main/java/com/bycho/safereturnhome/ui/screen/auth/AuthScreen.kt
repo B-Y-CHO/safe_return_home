@@ -70,7 +70,7 @@ fun AuthScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
-                text = "안심 귀가",
+                text = "구미 안심귀가",
                 style = MaterialTheme.typography.headlineMedium
             )
             Text(

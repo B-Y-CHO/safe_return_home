@@ -107,7 +107,7 @@ fun HomeScreen(
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             Text(
-                text = "안심 귀가",
+                text = "구미 안심귀가",
                 style = MaterialTheme.typography.headlineMedium
             )
 
