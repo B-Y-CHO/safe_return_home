@@ -138,6 +138,9 @@ private const val ROUTE_STREETLIGHT_MARKER_CLEAR_LIMIT = 2_000
 private const val METERS_PER_LATITUDE_DEGREE = 111_320.0
 private const val SOS_COUNTDOWN_SECONDS = 5
 private const val SOS_HOLD_DURATION_MILLIS = 3_000L
+private const val GUMI_CENTER_LATITUDE = 36.1195
+private const val GUMI_CENTER_LONGITUDE = 128.3446
+private const val GUMI_PRIORITY_RADIUS_METERS = 35_000f
 private const val SOS_SMS_SENT_ACTION = "com.bycho.safereturnhome.SOS_SMS_SENT"
 private const val SOS_SMS_REQUEST_ID_KEY = "sos-sms-request-id"
 
@@ -729,11 +732,6 @@ fun MapScreen(
                     }
                 }
             )
-        },
-        floatingActionButton = {
-            if (!isNavigationMode) {
-                SosFloatingActionButton(onSosActivated = onSosActivated)
-            }
         }
     ) { innerPadding ->
         Column(
@@ -753,7 +751,7 @@ fun MapScreen(
                     value = uiState.destinationQuery,
                     onValueChange = onDestinationQueryChanged,
                     label = { Text("목적지 검색") },
-                    placeholder = { Text("장소명 또는 주소") },
+                    placeholder = { Text("구미시 장소명 또는 주소") },
                     singleLine = true
                 )
                 Button(
@@ -3129,33 +3127,115 @@ private fun searchDestinationPoi(
     onSearchCompleted: (List<DestinationSearchResult>) -> Unit,
     onSearchFailed: (String) -> Unit
 ) {
-    runCatching {
-        TMapData().findAllPOI(
-            query.trim(),
-            10,
-            object : TMapData.OnFindAllPOIListener {
-                override fun onFindAllPOI(poiItems: ArrayList<com.skt.tmap.poi.TMapPOIItem>?) {
-                    val results = poiItems.orEmpty().mapNotNull { poiItem ->
-                        val point = poiItem.poiPoint ?: return@mapNotNull null
-                        DestinationSearchResult(
-                            name = poiItem.poiName.orEmpty(),
-                            address = poiItem.poiAddress.orEmpty(),
-                            latitude = point.latitude,
-                            longitude = point.longitude
-                        )
-                    }
-                    ContextCompat.getMainExecutor(context).execute {
-                        onSearchCompleted(results)
-                    }
-                }
-            }
-        )
-    }.onFailure { error ->
-        Log.e(TMAP_LOG_TAG, "Failed to search destination POI.", error)
+    val searchQueries = destinationSearchQueries(query)
+    val collectedResults = mutableListOf<DestinationSearchResult>()
+
+    fun completeSearch() {
+        val results = prioritizeGumiSearchResults(collectedResults)
         ContextCompat.getMainExecutor(context).execute {
-            onSearchFailed(error.message ?: "unknown error")
+            onSearchCompleted(results)
         }
     }
+
+    fun searchNextQuery(index: Int) {
+        if (index >= searchQueries.size) {
+            completeSearch()
+            return
+        }
+
+        runCatching {
+            TMapData().findAllPOI(
+                searchQueries[index],
+                10,
+                object : TMapData.OnFindAllPOIListener {
+                    override fun onFindAllPOI(
+                        poiItems: ArrayList<com.skt.tmap.poi.TMapPOIItem>?
+                    ) {
+                        val results = poiItems.orEmpty().mapNotNull { poiItem ->
+                            val point = poiItem.poiPoint ?: return@mapNotNull null
+                            DestinationSearchResult(
+                                name = poiItem.poiName.orEmpty(),
+                                address = poiItem.poiAddress.orEmpty(),
+                                latitude = point.latitude,
+                                longitude = point.longitude
+                            )
+                        }
+                        collectedResults += results
+                        searchNextQuery(index + 1)
+                    }
+                }
+            )
+        }.onFailure { error ->
+            Log.e(TMAP_LOG_TAG, "Failed to search destination POI.", error)
+            if (collectedResults.isNotEmpty() || index < searchQueries.lastIndex) {
+                searchNextQuery(index + 1)
+            } else {
+                ContextCompat.getMainExecutor(context).execute {
+                    onSearchFailed(error.message ?: "unknown error")
+                }
+            }
+        }
+    }
+
+    searchNextQuery(0)
+}
+
+private fun destinationSearchQueries(query: String): List<String> {
+    val trimmedQuery = query.trim()
+    if (trimmedQuery.isBlank()) return emptyList()
+    if (trimmedQuery.contains("구미", ignoreCase = true)) return listOf(trimmedQuery)
+    return listOf(
+        "구미 $trimmedQuery",
+        "구미시 $trimmedQuery",
+        trimmedQuery
+    ).distinct()
+}
+
+private fun prioritizeGumiSearchResults(
+    results: List<DestinationSearchResult>
+): List<DestinationSearchResult> {
+    return results
+        .distinctBy { result ->
+            listOf(
+                result.name.trim(),
+                result.address.trim(),
+                "%.6f".format(Locale.US, result.latitude),
+                "%.6f".format(Locale.US, result.longitude)
+            ).joinToString("|")
+        }
+        .withIndex()
+        .sortedWith(
+            compareBy<IndexedValue<DestinationSearchResult>> {
+                if (it.value.isGumiSearchResult()) 0 else 1
+            }.thenBy {
+                if (it.value.isGumiSearchResult()) {
+                    it.value.distanceFromGumiCenterMeters()
+                } else {
+                    Float.MAX_VALUE
+                }
+            }.thenBy {
+                it.index
+            }
+        )
+        .map(IndexedValue<DestinationSearchResult>::value)
+}
+
+private fun DestinationSearchResult.isGumiSearchResult(): Boolean {
+    return name.contains("구미", ignoreCase = true) ||
+        address.contains("구미", ignoreCase = true) ||
+        distanceFromGumiCenterMeters() <= GUMI_PRIORITY_RADIUS_METERS
+}
+
+private fun DestinationSearchResult.distanceFromGumiCenterMeters(): Float {
+    val distanceMeters = FloatArray(1)
+    Location.distanceBetween(
+        GUMI_CENTER_LATITUDE,
+        GUMI_CENTER_LONGITUDE,
+        latitude,
+        longitude,
+        distanceMeters
+    )
+    return distanceMeters[0]
 }
 
 private fun shortestAngleDifference(fromDegrees: Float, toDegrees: Float): Float {

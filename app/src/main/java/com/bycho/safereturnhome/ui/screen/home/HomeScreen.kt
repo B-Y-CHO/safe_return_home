@@ -2,11 +2,16 @@ package com.bycho.safereturnhome.ui.screen.home
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -20,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bycho.safereturnhome.ui.state.HomeUiState
@@ -96,26 +102,81 @@ fun HomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             Text(
                 text = "안심 귀가",
                 style = MaterialTheme.typography.headlineMedium
             )
-            Text(
-                text = "목적지를 설정하고 안전한 귀가 안내를 시작하세요.",
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Card(modifier = Modifier.fillMaxWidth()) {
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Text(text = "보호자 등록: ${if (uiState.guardianRegistered) "완료" else "미등록"}")
-                    Text(text = uiState.lastDestinationLabel)
+                    Text(
+                        text = "목적지를 정하고 안전한 경로로 이동하세요.",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Text(
+                        text = "CCTV와 가로등 정보를 참고하고, 위급할 때는 SOS 문자를 보낼 수 있습니다.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    Button(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        onClick = onStartTripClick
+                    ) {
+                        Text("귀가 시작하기")
+                    }
                 }
             }
+
+            HomeStatusCard(uiState = uiState)
+
+            if (!uiState.guardianRegistered) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "보호자 인증이 필요합니다.",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "SOS 문자를 보내려면 보호자 휴대폰 인증과 수신 번호 저장을 먼저 완료하세요.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = onGuardianSettingsClick
+                        ) {
+                            Text("보호자 설정하기")
+                        }
+                    }
+                }
+            }
+
+            FeatureSummary()
+
             if (SHOW_SERVER_CONTROLS) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -131,17 +192,6 @@ fun HomeScreen(
                             Text(text = it)
                         }
                     }
-                }
-            }
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = onStartTripClick
-                ) {
-                    Text("귀가 시작")
                 }
             }
             OutlinedButton(
@@ -164,6 +214,129 @@ fun HomeScreen(
             ) {
                 Text("로그아웃")
             }
+        }
+    }
+}
+
+@Composable
+private fun HomeStatusCard(uiState: HomeUiState) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                text = "오늘의 준비 상태",
+                style = MaterialTheme.typography.titleMedium
+            )
+            StatusLine(
+                label = "보호자 인증",
+                value = if (uiState.guardianRegistered) "완료" else "필요",
+                isPositive = uiState.guardianRegistered
+            )
+            StatusLine(
+                label = "SOS 문자",
+                value = if (uiState.guardianRegistered) "사용 가능" else "보호자 설정 필요",
+                isPositive = uiState.guardianRegistered
+            )
+            StatusLine(
+                label = "최근 목적지",
+                value = uiState.lastDestinationLabel,
+                isPositive = uiState.lastDestinationLabel != "최근 목적지가 없습니다."
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusLine(
+    label: String,
+    value: String,
+    isPositive: Boolean
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium
+        )
+        Text(
+            text = value,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 16.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.End,
+            color = if (isPositive) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.error
+            }
+        )
+    }
+}
+
+@Composable
+private fun FeatureSummary() {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = "안전 기능",
+            style = MaterialTheme.typography.titleMedium
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            FeatureItem(
+                modifier = Modifier.weight(1f),
+                title = "안전 경로",
+                description = "CCTV와 가로등 참고"
+            )
+            FeatureItem(
+                modifier = Modifier.weight(1f),
+                title = "SOS",
+                description = "3초 길게 눌러 문자"
+            )
+        }
+        FeatureItem(
+            modifier = Modifier.fillMaxWidth(),
+            title = "경로 이탈 대응",
+            description = "이동 중 경로를 벗어나면 재탐색을 안내합니다."
+        )
+    }
+}
+
+@Composable
+private fun FeatureItem(
+    modifier: Modifier,
+    title: String,
+    description: String
+) {
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
