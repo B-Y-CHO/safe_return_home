@@ -28,13 +28,25 @@
 
 ### 보행자 경로 안내
 
+- 경로 설정 화면에서 `일반 경로`와 `CCTV·가로등 참고 경로` 선택
 - TMap 보행자 경로 API를 이용한 실제 경로선 표시
+- CCTV·가로등 참고 경로 선택 시 구미시 학교 주변 및 생활방범 CCTV 좌표와 가로등 좌표를 참고한 보행 경로 표시
+- 현재 위치와 목적지 주변 CCTV 주소부터 병렬로 TMap 좌표로 변환하고 최대 `23시간` 동안 기기 내부에 캐시
+- CCTV 좌표, 출발지, 목적지로 후보 그래프를 만들고 CCTV 비보호 구간에 페널티를 주는 A* 탐색 실행
+- 가로등 인접도를 자체 휴리스틱 점수에 보조 반영해 같은 CCTV 후보 중 더 밝은 구간을 우선 선택
+- A*가 우회 허용 범위 안에서 선택한 CCTV 인접 지점을 최대 `3곳`까지 TMap 보행 경로 중간 좌표로 전달
+- 최종 경로선 주변 CCTV는 지도에 녹색 마커로 표시
+- 최종 경로선 기준 180m 안의 가로등은 지도에 노란색/주황색 마커로 표시
 - 안내 시작 후 지도 중심의 전용 안내 화면으로 전환
 - 현재 위치 기준 남은 경로 거리와 예상 도보 시간 갱신
 - 전체 경로 대비 진행률 바 표시
 - 경로 이탈 감지 및 자동 재탐색
 - 목적지 도착 감지
 - 안내 시작, 재탐색, 도착 시 진동 및 TTS 음성 안내
+- 다음 회전 또는 이동 안내와 해당 지점까지의 거리 표시
+- 다음 안내 지점 100m, 30m 전 TTS 음성 안내
+- 상세 안내 응답이 없는 환경에서는 보행 경로선의 방향 전환 지점을 분석해 좌우 회전 안내 생성
+- 접이식 `앞으로의 경로` 패널에서 최대 5개의 다음 안내와 경로상 거리 확인
 - 안내 중 화면 자동 꺼짐 방지
 
 ### 지도 방향 모드
@@ -42,6 +54,18 @@
 - 진행 방향 모드: 휴대폰이 향하는 방향이 지도 위쪽을 향하도록 회전
 - 북쪽 고정 모드: 지도 위쪽을 항상 북쪽으로 고정
 - 안내 화면의 버튼으로 두 모드 전환
+
+### SOS
+
+- 지도 화면 우측 하단에 빨간색 `SOS` 버튼 고정
+- 홈 화면의 보호자 설정에서 검증된 휴대폰 번호를 저장
+- 오작동 방지를 위해 `SOS` 버튼을 `3초` 동안 길게 눌러 실행
+- 실행 후 `5초` 카운트다운 동안 취소 가능
+- 문자 권한 승인 후 현재 위치 지도 링크가 포함된 보호자 문자를 자동 발송
+- 실제 SMS 발송 결과를 확인하고 실패 원인을 화면에 표시
+- 카운트다운 화면에서 `112` 전화 앱 연결 가능
+
+`112` 전화는 전화 앱만 열며 자동으로 발신하지 않습니다. 사용자가 전화 앱에서 통화 버튼을 눌러야 연결됩니다.
 
 ## 기술 구성
 
@@ -54,6 +78,7 @@
 - Android `TextToSpeech`
 - TMap Android SDK `3.5`
 - VSM TMap SDK `2.0.0`
+- Firebase Authentication
 
 ## 요구 사항
 
@@ -77,28 +102,49 @@ cd safe_return_home
 
 ### 2. `local.properties` 설정
 
-프로젝트 루트의 `local.properties` 파일에 Android SDK 경로와 TMap API 키를 설정합니다.
+프로젝트 루트의 `local.properties` 파일에 Android SDK 경로, TMap API 키, CCTV API 설정을 입력합니다.
 
 ```properties
 sdk.dir=C\:\\Users\\<YOUR_NAME>\\AppData\\Local\\Android\\Sdk
 TMAP_API_KEY=your_tmap_api_key
+CCTV_API_ENDPOINT=https://apis.data.go.kr/5080000/schulCfrCctvService/getSchulCfrCctv
+CCTV_CRIME_PREVENTION_API_ENDPOINT=https://apis.data.go.kr/5080000/lvlhCrmprvCctvService/getLvlhCrmprvCctv
+CCTV_API_KEY=your_public_data_api_key
+STREETLIGHT_API_ENDPOINT=https://api.odcloud.kr/api/15157590/v1/uddi:7265cf69-ea47-4608-ad58-e6640baf9371
+STREETLIGHT_API_KEY=your_public_data_api_key
 ```
 
 Windows의 `.properties` 파일에서는 드라이브 구분자와 경로 구분자를 이스케이프해야 합니다.
 
 `local.properties`는 Git에 포함하지 마세요. API 키를 README, 소스 코드, 이슈, 커밋에 직접 작성하면 안 됩니다.
 
-### 3. TMap API 권한 확인
+### 3. Firebase Authentication 설정
+
+Firebase 콘솔에서 Android 앱을 등록합니다.
+
+- Android 패키지 이름: `com.bycho.safereturnhome`
+- 로그인 제공업체: Authentication > Sign-in method > Email/Password 활성화
+- 보호자 휴대폰 인증을 쓰려면 Authentication > Sign-in method > Phone 활성화
+- 실제 SMS 인증을 쓰려면 Authentication > Settings > SMS region policy에서 `South Korea (+82)` 허용
+- 실제 SMS 인증은 Firebase Blaze 결제 플랜이 필요합니다. 결제 없이 개발 테스트를 할 때는 Phone numbers for testing에 테스트 번호와 인증 코드를 등록합니다.
+- Firebase 콘솔에서 `google-services.json`을 내려받아 `app/google-services.json`에 배치
+
+`google-services.json`이 없으면 앱은 컴파일되지만 로그인/회원가입 화면에서 Firebase 설정 필요 메시지를 표시합니다.
+
+Debug 빌드에서 Phone 인증을 테스트하려면 Firebase Android 앱 설정에 debug SHA-1/SHA-256 fingerprint도 등록합니다.
+
+### 4. TMap API 권한 확인
 
 TMap 콘솔에서 현재 키에 필요한 기능이 활성화되어 있는지 확인합니다.
 
 - 지도 보기
 - POI 검색
 - 보행자 경로 안내
+- 주소 검색
 
 권한이 없으면 지도 인증, 목적지 검색 또는 경로 조회가 실패할 수 있습니다.
 
-### 4. 빌드 및 실행
+### 5. 빌드 및 실행
 
 Android Studio에서 프로젝트를 연 뒤 Gradle Sync를 실행합니다. 이후 실제 기기 또는 에뮬레이터에서 앱을 실행합니다.
 
@@ -119,7 +165,7 @@ $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 6. `이 경로로 시작` 버튼을 누릅니다.
 7. 전용 경로 안내 화면에서 경로선, 남은 거리, 예상 시간, 진행률을 확인합니다.
 8. 필요하면 `북쪽 고정`, `진행 방향`, `+`, `-`, `내 위치` 버튼을 사용합니다.
-9. 안내를 끝내려면 `경로 안내 종료` 버튼을 누릅니다.
+9. 안내를 끝내려면 `경로 안내 종료` 버튼을 누릅니다. 목적지에 도착하거나 안내를 종료하면 홈 화면으로 돌아갑니다.
 
 ## 경로 안내 동작 기준
 
@@ -131,6 +177,8 @@ $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 
 경로 안내 중 남은 거리는 매 위치 갱신마다 서버에 재요청하지 않습니다. 기존 경로선에서 현재 위치와 가장 가까운 지점을 찾고, 해당 지점부터 목적지까지의 경로 길이를 합산합니다. 경로를 벗어난 경우에만 TMap 보행자 경로 API를 다시 호출합니다.
 
+CCTV·가로등 참고 경로의 A* 탐색은 공공데이터의 CCTV 좌표를 기반으로 생성한 후보 그래프에서 실행됩니다. 가로등은 CCTV 후보 사이의 구간 비용을 낮추는 보조 선호값으로만 사용합니다. 공공데이터에 실제 보행 도로 노드와 간선이 포함되어 있지 않으므로, A*가 고른 CCTV 인접 지점 사이의 실제 보행 경로선은 TMap 보행 경로 API가 계산합니다. 이 경로는 공공데이터 기반 참고 경로이며 실제 안전을 보장하는 공식 점수가 아닙니다.
+
 ## Android 권한
 
 앱은 다음 권한을 사용합니다.
@@ -141,6 +189,7 @@ $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 | `ACCESS_NETWORK_STATE` | 네트워크 상태 확인 |
 | `ACCESS_COARSE_LOCATION` | 대략적인 위치 확인 |
 | `ACCESS_FINE_LOCATION` | GPS 기반 현재 위치 추적 |
+| `SEND_SMS` | 보호자에게 현재 위치가 포함된 SOS 문자 자동 발송 |
 | `VIBRATE` | 안내 시작, 재탐색, 도착 진동 알림 |
 | `POST_NOTIFICATIONS` | 향후 알림 기능 확장을 위한 선언 |
 
@@ -151,7 +200,6 @@ app/src/main/java/com/bycho/safereturnhome/
 ├── navigation/                # Compose Navigation 경로
 ├── ui/screen/home/            # 홈 화면
 ├── ui/screen/map/             # 지도 설정 및 경로 안내 화면
-├── ui/screen/trip/            # 기존 이동 상태 화면
 ├── ui/state/                  # UI 상태 모델
 └── ui/viewmodel/              # 화면별 ViewModel
 
@@ -164,10 +212,22 @@ app/libs/
 
 - 백그라운드 위치 추적과 Foreground Service는 아직 구현되어 있지 않습니다.
 - 앱이 백그라운드로 전환되면 지속 안내를 보장하지 않습니다.
-- 턴바이턴 좌회전, 우회전 안내는 아직 제공하지 않습니다.
 - TTS 음성은 기기의 한국어 TTS 엔진과 미디어 볼륨 설정에 영향을 받습니다.
 - 방향 센서가 없는 기기에서는 GPS 이동 방향을 사용합니다.
 - GPS 정확도가 낮은 실내에서는 경로 이탈 판정이 흔들릴 수 있습니다.
+
+## 실기기 SOS 점검
+
+다음 항목은 SMS 발송이 가능한 실제 Android 기기에서 확인합니다.
+
+1. 보호자 설정에서 빈 값, 일반 전화번호, 자릿수가 잘못된 번호가 저장되지 않는지 확인합니다.
+2. 올바른 보호자 휴대폰 번호를 저장합니다.
+3. 문자 권한을 거부한 상태에서 SOS 버튼을 `3초` 동안 눌러 권한 필요 안내가 표시되는지 확인합니다.
+4. 문자 권한을 허용하고 SOS 버튼을 `3초` 동안 눌러 `5초` 카운트다운이 표시되는지 확인합니다.
+5. 카운트다운에서 취소를 눌러 문자가 발송되지 않는지 확인합니다.
+6. 다시 SOS를 실행하고 카운트다운 종료 후 보호자 기기에 현재 위치 링크가 포함된 문자가 도착하는지 확인합니다.
+7. 비행기 모드 등 통신 불가 상태에서 SOS를 실행해 실패 원인이 화면에 표시되는지 확인합니다.
+8. `112 전화 연결`을 눌러 전화 앱만 열리고 자동 발신되지 않는지 확인합니다.
 
 ## 보안 주의 사항
 

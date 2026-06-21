@@ -126,7 +126,14 @@ class MapViewModel : ViewModel() {
     fun onRouteSearchStarted() {
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = true,
-            routeSearchMessage = null
+            routeSearchMessage = "경로를 검색하는 중입니다."
+        )
+    }
+
+    fun onRouteSearchProgress(message: String) {
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = true,
+            routeSearchMessage = message
         )
     }
 
