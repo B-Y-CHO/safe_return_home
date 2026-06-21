@@ -78,6 +78,7 @@
 - Android `TextToSpeech`
 - TMap Android SDK `3.5`
 - VSM TMap SDK `2.0.0`
+- Firebase Authentication
 
 ## 요구 사항
 
@@ -117,7 +118,22 @@ Windows의 `.properties` 파일에서는 드라이브 구분자와 경로 구분
 
 `local.properties`는 Git에 포함하지 마세요. API 키를 README, 소스 코드, 이슈, 커밋에 직접 작성하면 안 됩니다.
 
-### 3. TMap API 권한 확인
+### 3. Firebase Authentication 설정
+
+Firebase 콘솔에서 Android 앱을 등록합니다.
+
+- Android 패키지 이름: `com.bycho.safereturnhome`
+- 로그인 제공업체: Authentication > Sign-in method > Email/Password 활성화
+- 보호자 휴대폰 인증을 쓰려면 Authentication > Sign-in method > Phone 활성화
+- 실제 SMS 인증을 쓰려면 Authentication > Settings > SMS region policy에서 `South Korea (+82)` 허용
+- 실제 SMS 인증은 Firebase Blaze 결제 플랜이 필요합니다. 결제 없이 개발 테스트를 할 때는 Phone numbers for testing에 테스트 번호와 인증 코드를 등록합니다.
+- Firebase 콘솔에서 `google-services.json`을 내려받아 `app/google-services.json`에 배치
+
+`google-services.json`이 없으면 앱은 컴파일되지만 로그인/회원가입 화면에서 Firebase 설정 필요 메시지를 표시합니다.
+
+Debug 빌드에서 Phone 인증을 테스트하려면 Firebase Android 앱 설정에 debug SHA-1/SHA-256 fingerprint도 등록합니다.
+
+### 4. TMap API 권한 확인
 
 TMap 콘솔에서 현재 키에 필요한 기능이 활성화되어 있는지 확인합니다.
 
@@ -128,7 +144,7 @@ TMap 콘솔에서 현재 키에 필요한 기능이 활성화되어 있는지 �
 
 권한이 없으면 지도 인증, 목적지 검색 또는 경로 조회가 실패할 수 있습니다.
 
-### 4. 빌드 및 실행
+### 5. 빌드 및 실행
 
 Android Studio에서 프로젝트를 연 뒤 Gradle Sync를 실행합니다. 이후 실제 기기 또는 에뮬레이터에서 앱을 실행합니다.
 

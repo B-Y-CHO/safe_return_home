@@ -1,6 +1,7 @@
 package com.bycho.safereturnhome.data
 
 import java.util.PriorityQueue
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -185,6 +186,16 @@ object CctvSafeRoutePlanner {
                     lineEnd = destination.point
                 )
                 if (distanceFromDirectPath > maxDistanceFromDirectPath) return@mapNotNull null
+                if (
+                    distanceFromDirectPath > DIRECT_PATH_CANDIDATE_RADIUS_METERS &&
+                    !hasAlternateCorridorSupport(
+                        candidate = projectedCoordinate,
+                        destination = destination.point,
+                        projectedCctvCoordinates = projectedCctvCoordinates
+                    )
+                ) {
+                    return@mapNotNull null
+                }
                 val detourDistance = projectedCoordinate.point.distanceTo(RoutePoint.ORIGIN) +
                     projectedCoordinate.point.distanceTo(destination.point) -
                     directDistance
@@ -221,6 +232,25 @@ object CctvSafeRoutePlanner {
             .sortedBy(RouteNode::candidateRank)
             .take(MAX_GRAPH_CCTV_NODE_COUNT)
             .sortedBy(RouteNode::progress)
+    }
+
+    private fun hasAlternateCorridorSupport(
+        candidate: ProjectedCctvCoordinate,
+        destination: RoutePoint,
+        projectedCctvCoordinates: List<ProjectedCctvCoordinate>
+    ): Boolean {
+        val candidateProgress = projectionProgress(candidate.point, destination)
+        return projectedCctvCoordinates.any { nearbyCoordinate ->
+            if (nearbyCoordinate.coordinate.address == candidate.coordinate.address) {
+                return@any false
+            }
+            val progressGap = abs(
+                projectionProgress(nearbyCoordinate.point, destination) - candidateProgress
+            )
+            progressGap >= MIN_ALTERNATE_CORRIDOR_PROGRESS_GAP &&
+                nearbyCoordinate.point.distanceTo(candidate.point) <=
+                ALTERNATE_CORRIDOR_NEIGHBOR_METERS
+        }
     }
 
     private fun findBestRoute(
@@ -505,6 +535,9 @@ object CctvSafeRoutePlanner {
     private const val MAX_ROUTE_PROGRESS = 0.95
     private const val MIN_WAYPOINT_PROGRESS_GAP = 0.08
     private const val MAX_GRAPH_CCTV_NODE_COUNT = 72
+    private const val DIRECT_PATH_CANDIDATE_RADIUS_METERS = 140.0
+    private const val ALTERNATE_CORRIDOR_NEIGHBOR_METERS = 550.0
+    private const val MIN_ALTERNATE_CORRIDOR_PROGRESS_GAP = 0.05
     private const val CCTV_COVERAGE_RADIUS_METERS = 180.0
     private const val STREETLIGHT_COVERAGE_RADIUS_METERS = 180.0
     private const val COVERAGE_SAMPLE_INTERVAL_METERS = 70.0

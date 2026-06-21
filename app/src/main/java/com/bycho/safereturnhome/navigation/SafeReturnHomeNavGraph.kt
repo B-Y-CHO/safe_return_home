@@ -11,14 +11,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.bycho.safereturnhome.ui.screen.auth.AuthRoute
 import com.bycho.safereturnhome.ui.screen.home.HomeRoute
 import com.bycho.safereturnhome.ui.screen.guardian.GuardianSettingsRoute
 import com.bycho.safereturnhome.ui.screen.map.MapRoute
 import com.bycho.safereturnhome.ui.screen.server.ServerSettingsRoute
+import com.bycho.safereturnhome.ui.viewmodel.AuthViewModel
 import com.bycho.safereturnhome.ui.viewmodel.SignalPollingViewModel
 
 @Composable
 fun SafeReturnHomeNavGraph(
+    authViewModel: AuthViewModel = viewModel(),
     signalPollingViewModel: SignalPollingViewModel = viewModel()
 ) {
     val navController = rememberNavController()
@@ -33,13 +36,29 @@ fun SafeReturnHomeNavGraph(
 
     NavHost(
         navController = navController,
-        startDestination = Routes.Home.route
+        startDestination = Routes.Auth.route
     ) {
+        composable(Routes.Auth.route) {
+            AuthRoute(
+                viewModel = authViewModel,
+                onAuthenticated = {
+                    navController.navigate(Routes.Home.route) {
+                        popUpTo(Routes.Auth.route) { inclusive = true }
+                    }
+                }
+            )
+        }
         composable(Routes.Home.route) {
             HomeRoute(
                 onStartTripClick = { navController.navigate(Routes.Map.route) },
                 onGuardianSettingsClick = { navController.navigate(Routes.GuardianSettings.route) },
                 onServerSettingsClick = { navController.navigate(Routes.ServerSettings.route) },
+                onLogoutClick = {
+                    authViewModel.signOut()
+                    navController.navigate(Routes.Auth.route) {
+                        popUpTo(Routes.Home.route) { inclusive = true }
+                    }
+                },
                 signalPollingUiState = signalPollingUiState
             )
         }

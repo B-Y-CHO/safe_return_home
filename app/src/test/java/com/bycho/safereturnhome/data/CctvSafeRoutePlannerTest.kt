@@ -77,6 +77,25 @@ class CctvSafeRoutePlannerTest {
     }
 
     @Test
+    fun ignoresIsolatedSideWaypointThatWouldOnlyCreateASpur() {
+        val plan = CctvSafeRoutePlanner.plan(
+            startLatitude = 36.10,
+            startLongitude = 128.30,
+            destinationLatitude = 36.10,
+            destinationLongitude = 128.318,
+            cctvCoordinates = listOf(
+                cctv(latitude = 36.102, longitude = 128.3090, address = "isolated-side-cctv")
+            ),
+            streetlightCoordinates = listOf(
+                streetlight(latitude = 36.102, longitude = 128.3090, address = "isolated-light")
+            ),
+            maxWaypointCount = 3
+        )
+
+        assertTrue(plan.waypoints.isEmpty())
+    }
+
+    @Test
     fun countsOnlyCctvCoordinatesRelevantToCurrentRoute() {
         val count = CctvSafeRoutePlanner.countRelevantCoordinates(
             startLatitude = 36.10,

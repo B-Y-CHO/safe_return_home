@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "292015311278",
+    "project_id": "safe-return-home-b0e95",
+    "storage_bucket": "safe-return-home-b0e95.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:292015311278:android:15cf3aefcf748ac324e03f",
+        "android_client_info": {
+          "package_name": "com.bycho.safereturnhome"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDop62josDjcwcXarbpmdAU8i9HN8a0q1k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

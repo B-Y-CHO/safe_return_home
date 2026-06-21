@@ -11,6 +11,8 @@ lifecycleRuntime = "2.9.4"
 material = "1.13.0"
 navigationCompose = "2.9.3"
 flatbuffersJava = "24.3.25"
+firebaseBom = "34.15.0"
+googleServices = "4.5.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -32,7 +34,10 @@ androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "l
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 flatbuffers-java = { group = "com.google.flatbuffers", name = "flatbuffers-java", version.ref = "flatbuffersJava" }
+firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
+firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

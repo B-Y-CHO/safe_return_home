@@ -5,6 +5,10 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 val localProperties = Properties().apply {
     val localPropertiesFile = rootProject.file("local.properties")
     if (localPropertiesFile.exists()) {
@@ -128,6 +132,8 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.flatbuffers.java)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.auth)
     implementation(files("libs/vsm-tmap-sdk-v2-android-2.0.0.aar"))
     implementation(files("libs/tmap-sdk-3.5.aar"))
 

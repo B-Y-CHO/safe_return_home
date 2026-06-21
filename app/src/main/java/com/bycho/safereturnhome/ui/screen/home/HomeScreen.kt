@@ -38,6 +38,7 @@ fun HomeRoute(
     onStartTripClick: () -> Unit,
     onGuardianSettingsClick: () -> Unit,
     onServerSettingsClick: () -> Unit,
+    onLogoutClick: () -> Unit,
     signalPollingUiState: SignalPollingUiState,
     viewModel: HomeViewModel = viewModel()
 ) {
@@ -47,7 +48,7 @@ fun HomeRoute(
     val guardianPreferences = remember(context) { GuardianPreferences(context) }
     val recentDestinationPreferences = remember(context) { RecentDestinationPreferences(context) }
     var guardianRegistered by remember {
-        mutableStateOf(guardianPreferences.getPhoneNumber().isNotBlank())
+        mutableStateOf(guardianPreferences.isPhoneNumberVerified())
     }
     var lastDestinationLabel by remember {
         mutableStateOf(
@@ -58,7 +59,7 @@ fun HomeRoute(
     DisposableEffect(lifecycleOwner, guardianPreferences, recentDestinationPreferences) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                guardianRegistered = guardianPreferences.getPhoneNumber().isNotBlank()
+                guardianRegistered = guardianPreferences.isPhoneNumberVerified()
                 lastDestinationLabel = recentDestinationPreferences
                     .getRecentDestination()
                     ?.label()
@@ -76,7 +77,8 @@ fun HomeRoute(
         signalPollingUiState = signalPollingUiState,
         onStartTripClick = onStartTripClick,
         onGuardianSettingsClick = onGuardianSettingsClick,
-        onServerSettingsClick = onServerSettingsClick
+        onServerSettingsClick = onServerSettingsClick,
+        onLogoutClick = onLogoutClick
     )
 }
 
@@ -86,7 +88,8 @@ fun HomeScreen(
     signalPollingUiState: SignalPollingUiState,
     onStartTripClick: () -> Unit,
     onGuardianSettingsClick: () -> Unit,
-    onServerSettingsClick: () -> Unit
+    onServerSettingsClick: () -> Unit,
+    onLogoutClick: () -> Unit
 ) {
     Scaffold { innerPadding ->
         Column(
@@ -154,6 +157,12 @@ fun HomeScreen(
                 ) {
                     Text("서버 설정")
                 }
+            }
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onLogoutClick
+            ) {
+                Text("로그아웃")
             }
         }
     }

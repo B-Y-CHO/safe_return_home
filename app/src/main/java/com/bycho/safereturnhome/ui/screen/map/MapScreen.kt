@@ -24,12 +24,6 @@ import android.os.Handler
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
-import android.view.Surface
-import android.view.WindowManager
 import android.util.Log
 import android.speech.tts.TextToSpeech
 import android.telephony.SmsManager
@@ -67,10 +61,10 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -105,6 +99,7 @@ import com.skt.tmap.overlay.TMapMarkerItem
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
@@ -121,8 +116,10 @@ private const val ROUTE_CCTV_MARKER_ID_PREFIX = "route-cctv-"
 private const val ROUTE_STREETLIGHT_MARKER_ID_PREFIX = "route-streetlight-"
 private const val LOCATION_UPDATE_INTERVAL_MILLIS = 2_500L
 private const val LOCATION_UPDATE_DISTANCE_METERS = 3f
-private const val MIN_HEADING_CHANGE_DEGREES = 2f
-private const val HEADING_SMOOTHING_FACTOR = 0.18f
+private const val CURRENT_LOCATION_MARKER_MIN_MOVE_METERS = 1f
+private const val CURRENT_LOCATION_ACCURACY_MIN_MOVE_METERS = 2f
+private const val CURRENT_LOCATION_ACCURACY_MIN_CHANGE_METERS = 3f
+private const val CURRENT_LOCATION_BEARING_BUCKET_DEGREES = 5
 private const val ROUTE_DEVIATION_THRESHOLD_METERS = 50f
 private const val ROUTE_DEVIATION_CONFIRMATION_COUNT = 3
 private const val DESTINATION_ARRIVAL_THRESHOLD_METERS = 20f
@@ -149,16 +146,52 @@ private enum class RouteMode {
     CCTV_SAFE
 }
 
+private data class RouteOptionPreview(
+    val distanceMeters: Int? = null,
+    val isLoading: Boolean = false,
+    val statusMessage: String? = null,
+    val errorMessage: String? = null,
+    val waypointCount: Int? = null,
+    val candidateCount: Int? = null
+)
+
+private data class RouteDistancePreview(
+    val destination: DestinationSearchResult,
+    val general: RouteOptionPreview,
+    val cctvSafe: RouteOptionPreview
+)
+
+private data class CctvSafeRouteDistancePreview(
+    val distanceMeters: Int?,
+    val waypointCount: Int,
+    val candidateCctvCount: Int
+)
+
 private class MapRenderState {
     var centeredLatitude: Double? = null
     var centeredLongitude: Double? = null
     var recenterRequestId: Int = -1
+    var locationPointLatitude: Double? = null
+    var locationPointLongitude: Double? = null
+    var currentMarkerLatitude: Double? = null
+    var currentMarkerLongitude: Double? = null
+    var currentMarkerBearingDegrees: Int? = null
+    private var currentLocationIconBearingDegrees: Int? = null
+    private var currentLocationIcon: Bitmap? = null
     var accuracyLatitude: Double? = null
     var accuracyLongitude: Double? = null
     var accuracyMeters: Float? = null
     var destination: DestinationSearchResult? = null
     var hasCurrentLocationMarker: Boolean = false
     var routeSearchRequestId: Int = 0
+
+    fun currentLocationIconFor(bearingDegrees: Int): Bitmap {
+        if (currentLocationIconBearingDegrees != bearingDegrees || currentLocationIcon == null) {
+            currentLocationIcon = createCurrentLocationIcon(bearingDegrees.toFloat())
+            currentLocationIconBearingDegrees = bearingDegrees
+        }
+        return currentLocationIcon!!
+    }
 }
 
 private data class RemainingRouteMetrics(
@@ -269,14 +302,17 @@ fun MapScreen(
     var routeSearchRequestId by remember { mutableIntStateOf(0) }
     var selectedRouteMode by remember { mutableStateOf(RouteMode.GENERAL) }
     var isFollowingCurrentLocation by remember { mutableStateOf(true) }
+    var isMapTouchInProgress by remember { mutableStateOf(false) }
     var isNavigationMode by remember { mutableStateOf(false) }
-    var isNorthUpMode by remember { mutableStateOf(false) }
-    var deviceHeadingDegrees by remember { mutableFloatStateOf(Float.NaN) }
     var tMapView by remember { mutableStateOf<TMapView?>(null) }
     var textToSpeech by remember { mutableStateOf<TextToSpeech?>(null) }
     var activeRoutePoints by remember { mutableStateOf<List<TMapPoint>>(emptyList()) }
     var activeCctvWaypointCount by remember { mutableIntStateOf(0) }
     var activeCctvRouteAnalysis by remember { mutableStateOf<CctvSafeRouteAnalysis?>(null) }
+    var routeDistancePreview by remember { mutableStateOf<RouteDistancePreview?>(null) }
+    var routeDistancePreviewRequestId by remember { mutableIntStateOf(0) }
+    var routeDistancePreviewStartLatitude by remember { mutableStateOf<Double?>(null) }
+    var routeDistancePreviewStartLongitude by remember { mutableStateOf<Double?>(null) }
     var routeGuidanceSteps by remember { mutableStateOf<List<RouteGuidanceStep>>(emptyList()) }
     var currentGuidanceStepIndex by remember { mutableIntStateOf(0) }
     var announcedGuidanceStepIndex by remember { mutableIntStateOf(-1) }
@@ -286,9 +322,11 @@ fun MapScreen(
     var hasArrivedAtDestination by remember { mutableStateOf(false) }
     var isArrivalNoticeVisible by remember { mutableStateOf(false) }
     var isNavigationEndConfirmationVisible by remember { mutableStateOf(false) }
-    var isUpcomingGuidanceExpanded by remember { mutableStateOf(false) }
     var savedGuardianPhoneNumber by remember {
-        mutableStateOf(guardianPreferences.getPhoneNumber())
+        mutableStateOf(guardianPreferences.getSosPhoneNumber())
+    }
+    val isSavedGuardianPhoneNumberVerified by remember {
+        mutableStateOf(guardianPreferences.isPhoneNumberVerified())
     }
     var sosCountdownSeconds by remember { mutableStateOf<Int?>(null) }
     var sosNoticeMessage by remember { mutableStateOf<String?>(null) }
@@ -467,14 +505,6 @@ fun MapScreen(
     }
 
     DisposableEffect(context) {
-        val stopHeadingUpdates = startDeviceHeadingUpdates(
-            context = context,
-            onHeadingChanged = { deviceHeadingDegrees = it }
-        )
-        onDispose(stopHeadingUpdates)
-    }
-
-    DisposableEffect(context) {
         val smsSentReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val request = activeSmsRequest ?: return
@@ -523,25 +553,165 @@ fun MapScreen(
         }
     }
 
-    LaunchedEffect(
-        tMapView,
-        isNavigationMode,
-        isFollowingCurrentLocation,
-        isNorthUpMode,
-        deviceHeadingDegrees
-    ) {
-        val view = tMapView ?: return@LaunchedEffect
-        val rotationDegrees = if (
-            isNavigationMode &&
-            isFollowingCurrentLocation &&
-            !isNorthUpMode &&
-            !deviceHeadingDegrees.isNaN()
+    val onSosActivated: () -> Unit = {
+        if (guardianPhoneNumberError(savedGuardianPhoneNumber) != null) {
+            sosNoticeMessage = "보호자 설정에서 올바른 휴대폰 번호 인증을 먼저 완료해주세요"
+        } else if (!isSavedGuardianPhoneNumberVerified) {
+            sosNoticeMessage = "보호자 설정에서 휴대폰 번호 인증을 먼저 완료해주세요"
+        } else if (
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.SEND_SMS
+            ) != PackageManager.PERMISSION_GRANTED
         ) {
-            -deviceHeadingDegrees.toDouble()
+            smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
         } else {
-            0.0
+            vibrate(context, longArrayOf(0, 120, 80, 120))
+            sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
         }
-        view.setRotationAngle(rotationDegrees)
+    }
+
+    fun updateRouteDistancePreview(
+        requestId: Int,
+        update: (RouteDistancePreview) -> RouteDistancePreview
+    ) {
+        if (routeDistancePreviewRequestId != requestId) return
+        routeDistancePreview = routeDistancePreview?.let(update)
+    }
+
+    fun requestRouteDistancePreview(
+        destination: DestinationSearchResult,
+        latitude: Double,
+        longitude: Double,
+        view: TMapView
+    ) {
+        val requestId = routeDistancePreviewRequestId + 1
+        routeDistancePreviewRequestId = requestId
+        routeDistancePreviewStartLatitude = latitude
+        routeDistancePreviewStartLongitude = longitude
+        routeDistancePreview = RouteDistancePreview(
+            destination = destination,
+            general = RouteOptionPreview(
+                isLoading = true,
+                statusMessage = "일반 경로 거리를 계산하는 중입니다."
+            ),
+            cctvSafe = RouteOptionPreview(
+                isLoading = true,
+                statusMessage = "CCTV·가로등 경로 거리를 계산하는 중입니다."
+            )
+        )
+
+        val startPoint = TMapPoint(latitude, longitude)
+        val destinationPoint = TMapPoint(destination.latitude, destination.longitude)
+        findPedestrianRouteDistance(
+            view = view,
+            startPoint = startPoint,
+            destinationPoint = destinationPoint
+        ) { generalDistanceMeters ->
+            updateRouteDistancePreview(requestId) { preview ->
+                preview.copy(
+                    general = RouteOptionPreview(
+                        distanceMeters = generalDistanceMeters,
+                        errorMessage = if (generalDistanceMeters == null) {
+                            "일반 경로 거리를 계산하지 못했습니다."
+                        } else {
+                            null
+                        }
+                    )
+                )
+            }
+            if (routeDistancePreviewRequestId != requestId) return@findPedestrianRouteDistance
+
+            findCctvSafeRouteDistancePreview(
+                view = view,
+                startPoint = startPoint,
+                destinationPoint = destinationPoint,
+                destinationAddress = destination.address,
+                generalDistanceMeters = generalDistanceMeters,
+                onProgress = { message ->
+                    updateRouteDistancePreview(requestId) { preview ->
+                        preview.copy(
+                            cctvSafe = preview.cctvSafe.copy(
+                                isLoading = true,
+                                statusMessage = message,
+                                errorMessage = null
+                            )
+                        )
+                    }
+                },
+                onCompleted = { previewResult ->
+                    updateRouteDistancePreview(requestId) { preview ->
+                        preview.copy(
+                            cctvSafe = RouteOptionPreview(
+                                distanceMeters = previewResult.distanceMeters,
+                                errorMessage = if (previewResult.distanceMeters == null) {
+                                    "CCTV·가로등 경로 거리를 계산하지 못했습니다."
+                                } else {
+                                    null
+                                },
+                                waypointCount = previewResult.waypointCount,
+                                candidateCount = previewResult.candidateCctvCount
+                            )
+                        )
+                    }
+                },
+                onFailed = { reason ->
+                    updateRouteDistancePreview(requestId) { preview ->
+                        preview.copy(
+                            cctvSafe = RouteOptionPreview(
+                                errorMessage = reason
+                            )
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    LaunchedEffect(
+        uiState.selectedDestination,
+        uiState.currentLatitude,
+        uiState.currentLongitude,
+        tMapView,
+        isNavigationMode
+    ) {
+        if (isNavigationMode) return@LaunchedEffect
+        val destination = uiState.selectedDestination
+        if (destination == null) {
+            routeDistancePreview = null
+            routeDistancePreviewStartLatitude = null
+            routeDistancePreviewStartLongitude = null
+            return@LaunchedEffect
+        }
+        val latitude = uiState.currentLatitude ?: return@LaunchedEffect
+        val longitude = uiState.currentLongitude ?: return@LaunchedEffect
+        val view = tMapView ?: return@LaunchedEffect
+        val previewStartLatitude = routeDistancePreviewStartLatitude
+        val previewStartLongitude = routeDistancePreviewStartLongitude
+        val hasMovedFromPreviewStart = if (
+            previewStartLatitude != null &&
+            previewStartLongitude != null
+        ) {
+            calculateDistanceMeters(
+                startLatitude = previewStartLatitude,
+                startLongitude = previewStartLongitude,
+                endLatitude = latitude,
+                endLongitude = longitude
+            ) >= 50.0
+        } else {
+            true
+        }
+        if (
+            routeDistancePreview?.destination != destination ||
+            hasMovedFromPreviewStart
+        ) {
+            requestRouteDistancePreview(
+                destination = destination,
+                latitude = latitude,
+                longitude = longitude,
+                view = view
+            )
+        }
     }
 
     Scaffold(
@@ -561,31 +731,20 @@ fun MapScreen(
             )
         },
         floatingActionButton = {
-            SosFloatingActionButton(
-                onSosActivated = {
-                    if (guardianPhoneNumberError(savedGuardianPhoneNumber) != null) {
-                        sosNoticeMessage = "보호자 설정에서 올바른 휴대폰 번호를 먼저 저장해주세요"
-                    } else if (
-                        ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.SEND_SMS
-                        ) != PackageManager.PERMISSION_GRANTED
-                    ) {
-                        smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
-                    } else {
-                        vibrate(context, longArrayOf(0, 120, 80, 120))
-                        sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
-                    }
-                }
-            )
+            if (!isNavigationMode) {
+                SosFloatingActionButton(onSosActivated = onSosActivated)
+            }
         }
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(24.dp)
-                .verticalScroll(rememberScrollState()),
+                .padding(if (isNavigationMode) 0.dp else 24.dp)
+                .verticalScroll(
+                    state = rememberScrollState(),
+                    enabled = !isNavigationMode && !isMapTouchInProgress
+                ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             if (!isNavigationMode) {
@@ -622,12 +781,16 @@ fun MapScreen(
                         modifier = Modifier.fillMaxWidth(),
                         onClick = {
                             isFollowingCurrentLocation = false
+                            selectedRouteMode = RouteMode.GENERAL
                             hasArrivedAtDestination = false
                             isRouteRecalculationInProgress = false
                             consecutiveRouteDeviationCount = 0
                             activeRoutePoints = emptyList()
                             activeCctvWaypointCount = 0
                             activeCctvRouteAnalysis = null
+                            routeDistancePreview = null
+                            routeDistancePreviewStartLatitude = null
+                            routeDistancePreviewStartLongitude = null
                             routeGuidanceSteps = emptyList()
                             currentGuidanceStepIndex = 0
                             announcedGuidanceStepIndex = -1
@@ -650,51 +813,29 @@ fun MapScreen(
                     style = MaterialTheme.typography.bodyLarge
                 )
             }
-            if (isNavigationMode) {
-                val guidanceStep = routeGuidanceSteps.getOrNull(currentGuidanceStepIndex)
-                val distanceToGuidanceStep = if (
-                    guidanceStep != null &&
-                    uiState.currentLatitude != null &&
-                    uiState.currentLongitude != null
-                ) {
-                    calculateDistanceMeters(
-                        startLatitude = uiState.currentLatitude,
-                        startLongitude = uiState.currentLongitude,
-                        endLatitude = guidanceStep.latitude,
-                        endLongitude = guidanceStep.longitude
-                    ).toInt()
-                } else {
-                    null
-                }
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = guidanceStep?.maneuver?.ifBlank { "다음 안내" }
-                                ?: "경로 안내 준비 중",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        if (
-                            guidanceStep != null &&
-                            guidanceStep.instruction.isNotBlank() &&
-                            guidanceStep.instruction != guidanceStep.maneuver
-                        ) {
-                            Text(text = guidanceStep.instruction)
-                        }
-                        distanceToGuidanceStep?.let { distanceMeters ->
-                            Text(text = "${distanceMeters}m 앞")
-                        }
-                    }
-                }
-            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(if (isNavigationMode) 560.dp else 280.dp)
-                    .padding(bottom = 4.dp)
+                    .then(
+                        if (isNavigationMode) {
+                            Modifier.weight(1f)
+                        } else {
+                            Modifier.height(280.dp)
+                        }
+                    )
+                    .padding(bottom = if (isNavigationMode) 0.dp else 4.dp)
             ) {
+                val currentLocationMarkerBearingDegrees = uiState.currentLocationBearingDegrees
+                val recenterToCurrentLocation = {
+                    isFollowingCurrentLocation = true
+                    recenterRequestId += 1
+                    val latitude = uiState.currentLatitude
+                    val longitude = uiState.currentLongitude
+                    if (latitude != null && longitude != null) {
+                        tMapView?.setZoomLevel(17)
+                        tMapView?.setCenterPoint(latitude, longitude)
+                    }
+                }
                 TMapViewContainer(
                     modifier = Modifier.fillMaxSize(),
                     apiKey = if (uiState.hasApiKey) BuildConfig.TMAP_API_KEY else "",
@@ -702,16 +843,7 @@ fun MapScreen(
                     latitude = uiState.currentLatitude,
                     longitude = uiState.currentLongitude,
                     accuracyMeters = uiState.currentLocationAccuracyMeters,
-                    bearingDegrees = if (
-                        isNavigationMode &&
-                        isFollowingCurrentLocation &&
-                        !isNorthUpMode
-                    ) {
-                        0f
-                    } else {
-                        deviceHeadingDegrees.takeUnless(Float::isNaN)
-                            ?: uiState.currentLocationBearingDegrees
-                    },
+                    bearingDegrees = currentLocationMarkerBearingDegrees,
                     recenterRequestId = recenterRequestId,
                     destination = uiState.selectedDestination,
                     destinationFocusRequestId = destinationFocusRequestId,
@@ -719,6 +851,7 @@ fun MapScreen(
                     routeMode = selectedRouteMode,
                     isFollowingCurrentLocation = isFollowingCurrentLocation,
                     onMapInteraction = { isFollowingCurrentLocation = false },
+                    onMapTouchStateChanged = { isMapTouchInProgress = it },
                     onMapReady = onMapReady,
                     onApiKeyFailed = onApiKeyFailed,
                     onMapViewCreated = { tMapView = it },
@@ -758,75 +891,151 @@ fun MapScreen(
                         announcedGuidanceThresholdMeters = Int.MAX_VALUE
                     }
                 )
-                Button(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(12.dp),
-                    enabled = uiState.currentLatitude != null && uiState.currentLongitude != null,
-                    onClick = {
-                        isFollowingCurrentLocation = true
-                        recenterRequestId += 1
-                        val latitude = uiState.currentLatitude
-                        val longitude = uiState.currentLongitude
-                        if (latitude != null && longitude != null) {
-                            tMapView?.setZoomLevel(17)
-                            tMapView?.setCenterPoint(latitude, longitude)
-                        }
-                    }
-                ) {
-                    Text("내 위치")
-                }
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(onClick = { tMapView?.mapZoomIn() }) {
-                        Text("+")
-                    }
-                    Button(onClick = { tMapView?.mapZoomOut() }) {
-                        Text("-")
-                    }
-                }
                 if (isNavigationMode) {
-                    Button(
+                    val guidanceStep = routeGuidanceSteps.getOrNull(currentGuidanceStepIndex)
+                    val distanceToGuidanceStep = if (
+                        guidanceStep != null &&
+                        uiState.currentLatitude != null &&
+                        uiState.currentLongitude != null
+                    ) {
+                        calculateDistanceMeters(
+                            startLatitude = uiState.currentLatitude,
+                            startLongitude = uiState.currentLongitude,
+                            endLatitude = guidanceStep.latitude,
+                            endLongitude = guidanceStep.longitude
+                        ).toInt()
+                    } else {
+                        null
+                    }
+                    Card(
                         modifier = Modifier
                             .align(Alignment.TopStart)
-                            .padding(12.dp),
-                        onClick = { isNorthUpMode = !isNorthUpMode }
+                            .fillMaxWidth()
+                            .padding(start = 12.dp, top = 12.dp, end = 92.dp)
                     ) {
-                        Text(if (isNorthUpMode) "진행 방향" else "북쪽 고정")
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = guidanceDirectionSymbol(guidanceStep),
+                                style = MaterialTheme.typography.displaySmall
+                            )
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = guidanceStep?.maneuver?.ifBlank { "다음 안내" }
+                                        ?: "경로 안내 준비 중",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                distanceToGuidanceStep?.let { distanceMeters ->
+                                    Text(text = "${distanceMeters}m 앞")
+                                }
+                            }
+                        }
+                    }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp)
+                    ) {
+                        SosFloatingActionButton(onSosActivated = onSosActivated)
+                    }
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalAlignment = Alignment.End
+                        ) {
+                            Button(onClick = { tMapView?.mapZoomIn() }) {
+                                Text("+")
+                            }
+                            Button(onClick = { tMapView?.mapZoomOut() }) {
+                                Text("-")
+                            }
+                            Button(
+                                enabled = uiState.currentLatitude != null &&
+                                    uiState.currentLongitude != null,
+                                onClick = recenterToCurrentLocation
+                            ) {
+                                Text("내 위치")
+                            }
+                        }
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = uiState.routeSummary,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                LinearProgressIndicator(
+                                    progress = { uiState.routeProgress },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(text = "진행률 ${(uiState.routeProgress * 100).toInt()}%")
+                                    OutlinedButton(
+                                        onClick = { isNavigationEndConfirmationVisible = true }
+                                    ) {
+                                        Text("안내 종료")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!isNavigationMode) {
+                    Button(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(12.dp),
+                        enabled = uiState.currentLatitude != null && uiState.currentLongitude != null,
+                        onClick = recenterToCurrentLocation
+                    ) {
+                        Text("내 위치")
+                    }
+                }
+                if (!isNavigationMode) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(onClick = { tMapView?.mapZoomIn() }) {
+                            Text("+")
+                        }
+                        Button(onClick = { tMapView?.mapZoomOut() }) {
+                            Text("-")
+                        }
                     }
                 }
             }
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(text = uiState.routeSummary)
-                    if (isNavigationMode && selectedRouteMode == RouteMode.CCTV_SAFE) {
-                        activeCctvRouteAnalysis?.let { analysis ->
-                            CctvSafeRouteAnalysisSummary(analysis)
-                        } ?: Text(
-                            text = if (activeCctvWaypointCount > 0) {
-                                "CCTV·가로등 참고 경로: 경로 주변 CCTV ${activeCctvWaypointCount}곳을 표시했습니다."
-                            } else {
-                                "CCTV·가로등 참고 경로: A* 분석 결과 추가 우회가 필요하지 않습니다."
-                            }
-                        )
-                    }
-                    if (isNavigationMode) {
-                        LinearProgressIndicator(
-                            progress = { uiState.routeProgress },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(text = "경로 진행률: ${(uiState.routeProgress * 100).toInt()}%")
-                    }
-                    if (isNavigationMode) {
-                        uiState.routeSearchMessage?.let { Text(text = it) }
-                    } else {
+            val selectedRouteOptionPreview = routeDistancePreview.optionFor(selectedRouteMode)
+            val isSelectedRoutePreviewLoading =
+                selectedRouteOptionPreview?.isLoading == true
+            if (!isNavigationMode) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text(text = uiState.mapStatusLabel)
                         Text(text = uiState.currentLocationLabel)
                         Text(text = uiState.gpsSignalLabel)
@@ -836,69 +1045,7 @@ fun MapScreen(
                     }
                 }
             }
-            if (isNavigationMode) {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        TextButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                isUpcomingGuidanceExpanded = !isUpcomingGuidanceExpanded
-                            }
-                        ) {
-                            Text(
-                                if (isUpcomingGuidanceExpanded) {
-                                    "앞으로의 경로 접기"
-                                } else {
-                                    "앞으로의 경로 펼치기"
-                                }
-                            )
-                        }
-                        if (isUpcomingGuidanceExpanded) {
-                            val upcomingGuidanceSteps = routeGuidanceSteps
-                                .drop(currentGuidanceStepIndex)
-                                .take(5)
-                            if (upcomingGuidanceSteps.isEmpty()) {
-                                Text("표시할 다음 안내가 없습니다")
-                            } else {
-                                upcomingGuidanceSteps.forEach { guidanceStep ->
-                                    val distanceMeters = if (
-                                        uiState.currentLatitude != null &&
-                                        uiState.currentLongitude != null
-                                    ) {
-                                        calculateRouteDistanceToGuidanceStepMeters(
-                                            currentLatitude = uiState.currentLatitude,
-                                            currentLongitude = uiState.currentLongitude,
-                                            routePoints = activeRoutePoints,
-                                            guidanceStep = guidanceStep
-                                        )
-                                    } else {
-                                        null
-                                    }
-                                    Text(
-                                        text = buildString {
-                                            if (distanceMeters != null) {
-                                                append("${distanceMeters}m 앞 ")
-                                            }
-                                            append(guidanceStep.maneuver)
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if (isNavigationMode) {
-                OutlinedButton(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = { isNavigationEndConfirmationVisible = true }
-                ) {
-                    Text("경로 안내 종료")
-                }
-            } else {
+            if (!isNavigationMode) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(16.dp),
@@ -914,7 +1061,8 @@ fun MapScreen(
                         ) {
                             RouteModeButton(
                                 modifier = Modifier.weight(1f),
-                                text = "일반 경로",
+                                title = "일반 경로",
+                                supportingText = routeOptionPreviewLabel(routeDistancePreview?.general),
                                 isSelected = selectedRouteMode == RouteMode.GENERAL,
                                 onClick = {
                                     selectedRouteMode = RouteMode.GENERAL
@@ -924,17 +1072,17 @@ fun MapScreen(
                             )
                             RouteModeButton(
                                 modifier = Modifier.weight(1f),
-                                text = "CCTV·가로등",
+                                title = "CCTV·가로등",
+                                supportingText = routeOptionPreviewLabel(routeDistancePreview?.cctvSafe),
                                 isSelected = selectedRouteMode == RouteMode.CCTV_SAFE,
                                 onClick = { selectedRouteMode = RouteMode.CCTV_SAFE }
                             )
                         }
                         Text(
-                            text = if (selectedRouteMode == RouteMode.GENERAL) {
-                                "거리 중심의 일반 보행 경로를 안내합니다."
-                            } else {
-                                "CCTV와 가로등 공공데이터를 참고해 인접 구간을 우선 반영합니다."
-                            }
+                            text = routeSelectionDescription(
+                                selectedRouteMode = selectedRouteMode,
+                                preview = routeDistancePreview
+                            )
                         )
                     }
                 }
@@ -943,7 +1091,8 @@ fun MapScreen(
                     enabled = uiState.currentLatitude != null &&
                         uiState.currentLongitude != null &&
                         uiState.selectedDestination != null &&
-                        !uiState.isRouteSearchInProgress,
+                        !uiState.isRouteSearchInProgress &&
+                        !isSelectedRoutePreviewLoading,
                     onClick = {
                         activeCctvWaypointCount = 0
                         activeCctvRouteAnalysis = null
@@ -954,6 +1103,8 @@ fun MapScreen(
                     Text(
                         if (uiState.isRouteSearchInProgress) {
                             "경로 준비 중..."
+                        } else if (isSelectedRoutePreviewLoading) {
+                            "거리 계산 중..."
                         } else {
                             "이 경로로 시작"
                         }
@@ -1027,8 +1178,6 @@ fun MapScreen(
                     onClick = {
                         isNavigationEndConfirmationVisible = false
                         isNavigationMode = false
-                        isNorthUpMode = false
-                        isUpcomingGuidanceExpanded = false
                         onNavigationFinished()
                     }
                 ) {
@@ -1155,6 +1304,7 @@ private fun openEmergencyDialer(context: Context) {
     }
 }
 
+@SuppressLint("ClickableViewAccessibility")
 @Composable
 private fun TMapViewContainer(
     modifier: Modifier,
@@ -1171,6 +1321,7 @@ private fun TMapViewContainer(
     routeMode: RouteMode,
     isFollowingCurrentLocation: Boolean,
     onMapInteraction: () -> Unit,
+    onMapTouchStateChanged: (Boolean) -> Unit,
     onMapReady: () -> Unit,
     onApiKeyFailed: (String?) -> Unit,
     onMapViewCreated: (TMapView) -> Unit,
@@ -1184,6 +1335,7 @@ private fun TMapViewContainer(
 ) {
     var lastDestinationFocusRequestId by remember { mutableIntStateOf(0) }
     val renderState = remember { MapRenderState() }
+    val currentOnMapTouchStateChanged by rememberUpdatedState(onMapTouchStateChanged)
 
     if (!hasApiKey) {
         Card(modifier = modifier) {
@@ -1242,21 +1394,51 @@ private fun TMapViewContainer(
                         return false
                     }
                 })
+                setOnTouchListener { _, event ->
+                    when (event.actionMasked) {
+                        android.view.MotionEvent.ACTION_DOWN ->
+                            currentOnMapTouchStateChanged(true)
+                        android.view.MotionEvent.ACTION_UP,
+                        android.view.MotionEvent.ACTION_CANCEL ->
+                            currentOnMapTouchStateChanged(false)
+                    }
+                    false
+                }
                 setSKTMapApiKey(apiKey)
             }
         },
         update = { view ->
             if (latitude != null && longitude != null) {
-                Log.d(
-                    TMAP_LOG_TAG,
-                    "Updating current location: $latitude, $longitude (follow: $isFollowingCurrentLocation, request: $recenterRequestId)"
+                val shouldUpdateLocationPoint = shouldUpdateCoordinate(
+                    lastLatitude = renderState.locationPointLatitude,
+                    lastLongitude = renderState.locationPointLongitude,
+                    latitude = latitude,
+                    longitude = longitude,
+                    minDistanceMeters = CURRENT_LOCATION_MARKER_MIN_MOVE_METERS
                 )
+                val shouldRecenter = isFollowingCurrentLocation &&
+                    (
+                        renderState.recenterRequestId != recenterRequestId ||
+                            shouldUpdateCoordinate(
+                                lastLatitude = renderState.centeredLatitude,
+                                lastLongitude = renderState.centeredLongitude,
+                                latitude = latitude,
+                                longitude = longitude,
+                                minDistanceMeters = CURRENT_LOCATION_MARKER_MIN_MOVE_METERS
+                            )
+                    )
+                if (shouldUpdateLocationPoint || shouldRecenter) {
+                    Log.d(
+                        TMAP_LOG_TAG,
+                        "Updating current location: $latitude, $longitude (follow: $isFollowingCurrentLocation, request: $recenterRequestId)"
+                    )
+                }
                 runCatching {
-                    view.setLocationPoint(latitude, longitude)
-                    val shouldRecenter = isFollowingCurrentLocation &&
-                        (renderState.centeredLatitude != latitude ||
-                            renderState.centeredLongitude != longitude ||
-                            renderState.recenterRequestId != recenterRequestId)
+                    if (shouldUpdateLocationPoint) {
+                        view.setLocationPoint(latitude, longitude)
+                        renderState.locationPointLatitude = latitude
+                        renderState.locationPointLongitude = longitude
+                    }
                     if (shouldRecenter) {
                         view.setZoomLevel(17)
                         view.setCenterPoint(latitude, longitude)
@@ -1267,25 +1449,50 @@ private fun TMapViewContainer(
                 }.onFailure { error ->
                     Log.e(TMAP_LOG_TAG, "Failed to move map to current location.", error)
                 }
-                runCatching {
-                    val currentLocationMarker = createCurrentLocationMarker(
+                val bearingBucketDegrees = quantizeBearingDegrees(bearingDegrees)
+                val shouldUpdateCurrentMarker = !renderState.hasCurrentLocationMarker ||
+                    renderState.currentMarkerBearingDegrees != bearingBucketDegrees ||
+                    shouldUpdateCoordinate(
+                        lastLatitude = renderState.currentMarkerLatitude,
+                        lastLongitude = renderState.currentMarkerLongitude,
                         latitude = latitude,
                         longitude = longitude,
-                        bearingDegrees = bearingDegrees
+                        minDistanceMeters = CURRENT_LOCATION_MARKER_MIN_MOVE_METERS
                     )
-                    if (renderState.hasCurrentLocationMarker) {
-                        view.updateTMapMarkerItem(currentLocationMarker)
-                    } else {
-                        view.addTMapMarkerItem(currentLocationMarker)
-                        renderState.hasCurrentLocationMarker = true
+                runCatching {
+                    if (shouldUpdateCurrentMarker) {
+                        val currentLocationMarker = createCurrentLocationMarker(
+                            latitude = latitude,
+                            longitude = longitude,
+                            icon = renderState.currentLocationIconFor(bearingBucketDegrees)
+                        )
+                        if (renderState.hasCurrentLocationMarker) {
+                            view.updateTMapMarkerItem(currentLocationMarker)
+                        } else {
+                            view.addTMapMarkerItem(currentLocationMarker)
+                            renderState.hasCurrentLocationMarker = true
+                        }
+                        renderState.currentMarkerLatitude = latitude
+                        renderState.currentMarkerLongitude = longitude
+                        renderState.currentMarkerBearingDegrees = bearingBucketDegrees
                     }
                 }.onFailure { error ->
                     Log.w(TMAP_LOG_TAG, "Failed to show the current location marker.", error)
                 }
+                val previousAccuracyMeters = renderState.accuracyMeters
                 val shouldUpdateAccuracyCircle = accuracyMeters != null &&
-                    (renderState.accuracyLatitude != latitude ||
-                        renderState.accuracyLongitude != longitude ||
-                        renderState.accuracyMeters != accuracyMeters)
+                    (
+                        previousAccuracyMeters == null ||
+                            abs(previousAccuracyMeters - accuracyMeters) >=
+                            CURRENT_LOCATION_ACCURACY_MIN_CHANGE_METERS ||
+                            shouldUpdateCoordinate(
+                                lastLatitude = renderState.accuracyLatitude,
+                                lastLongitude = renderState.accuracyLongitude,
+                                latitude = latitude,
+                                longitude = longitude,
+                                minDistanceMeters = CURRENT_LOCATION_ACCURACY_MIN_MOVE_METERS
+                            )
+                    )
                 if (shouldUpdateAccuracyCircle) {
                     runCatching {
                         view.removeTMapCircle(CURRENT_LOCATION_ACCURACY_CIRCLE_ID)
@@ -1366,60 +1573,117 @@ private fun TMapViewContainer(
 @Composable
 private fun RouteModeButton(
     modifier: Modifier,
-    text: String,
+    title: String,
+    supportingText: String,
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
+    val content: @Composable () -> Unit = {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(title)
+            Text(
+                text = supportingText,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
     if (isSelected) {
         Button(
             modifier = modifier,
             onClick = onClick
         ) {
-            Text(text)
+            content()
         }
     } else {
         OutlinedButton(
             modifier = modifier,
             onClick = onClick
         ) {
-            Text(text)
+            content()
         }
     }
 }
 
-@Composable
-private fun CctvSafeRouteAnalysisSummary(
-    analysis: CctvSafeRouteAnalysis
-) {
-    Column(
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        Text(
-            text = "CCTV·가로등 참고 경로 분석",
-            style = MaterialTheme.typography.titleSmall
-        )
-        Text(
-            text = "일반 경로: ${formatDistance(analysis.generalDistanceMeters)} · " +
-                "참고 경로: ${formatDistance(analysis.safeDistanceMeters)}"
-        )
-        Text(
-            text = "경로 주변 CCTV: ${formatCount(analysis.routeCctvCount)} · " +
-                "분석 후보: ${analysis.candidateCctvCount}곳"
-        )
-        Text(
-            text = "경로 주변 가로등: ${formatStreetlightCount(
-                lampCount = analysis.routeStreetlightLampCount,
-                locationCount = analysis.routeStreetlightLocationCount
-            )}"
-        )
-        Text(text = "CCTV 인접도 추정: ${analysis.coveragePercent()}%")
-        Text(text = "가로등 인접도 추정: ${analysis.streetlightCoveragePercent()}")
-        Text(text = analysis.explanation())
+private fun guidanceDirectionSymbol(guidanceStep: RouteGuidanceStep?): String {
+    val guidanceText = listOfNotNull(
+        guidanceStep?.maneuver,
+        guidanceStep?.instruction
+    ).joinToString(" ")
+    return when {
+        guidanceText.contains("좌회전") -> "←"
+        guidanceText.contains("우회전") -> "→"
+        guidanceText.contains("직진") -> "↑"
+        guidanceText.contains("유턴") -> "↩"
+        guidanceText.contains("횡단") || guidanceText.contains("건너") -> "↗"
+        guidanceText.contains("목적지") -> "◎"
+        else -> "◆"
     }
 }
 
-private fun formatDistance(distanceMeters: Int?): String {
-    if (distanceMeters == null) return "비교 불가"
+private fun RouteDistancePreview?.optionFor(routeMode: RouteMode): RouteOptionPreview? {
+    return when (routeMode) {
+        RouteMode.GENERAL -> this?.general
+        RouteMode.CCTV_SAFE -> this?.cctvSafe
+    }
+}
+
+private fun routeOptionPreviewLabel(preview: RouteOptionPreview?): String {
+    return when {
+        preview == null -> "목적지 선택 후 계산"
+        preview.isLoading -> "계산 중..."
+        preview.distanceMeters != null -> {
+            "${formatRouteDistance(preview.distanceMeters)} · 약 ${walkingMinutes(preview.distanceMeters)}분"
+        }
+        preview.errorMessage != null -> "계산 실패"
+        else -> "계산 대기"
+    }
+}
+
+private fun routeSelectionDescription(
+    selectedRouteMode: RouteMode,
+    preview: RouteDistancePreview?
+): String {
+    if (preview == null) {
+        return "목적지를 선택하면 실제 보행 거리로 두 경로를 비교합니다."
+    }
+    val selectedPreview = preview.optionFor(selectedRouteMode)
+    selectedPreview?.statusMessage?.let { return it }
+    selectedPreview?.errorMessage?.let { error ->
+        return "$error 선택하면 경로 검색을 다시 시도합니다."
+    }
+    val selectedDistance = selectedPreview?.distanceMeters
+    val generalDistance = preview.general.distanceMeters
+    return when (selectedRouteMode) {
+        RouteMode.GENERAL -> {
+            if (selectedDistance != null) {
+                "거리 중심의 일반 보행 경로입니다."
+            } else {
+                "일반 경로 거리를 계산하는 중입니다."
+            }
+        }
+        RouteMode.CCTV_SAFE -> {
+            if (selectedDistance == null) {
+                return "CCTV와 가로등 공공데이터를 참고해 인접 구간을 계산하는 중입니다."
+            }
+            val waypointCount = selectedPreview.waypointCount ?: 0
+            val baseDescription = if (waypointCount > 0) {
+                "CCTV·가로등 인접 구간 ${waypointCount}곳을 반영합니다."
+            } else {
+                "추가 우회 없이 CCTV·가로등 인접 정보를 표시합니다."
+            }
+            if (generalDistance == null) {
+                baseDescription
+            } else {
+                "$baseDescription ${formatRouteDistanceDelta(selectedDistance - generalDistance)}"
+            }
+        }
+    }
+}
+
+private fun formatRouteDistance(distanceMeters: Int): String {
     return if (distanceMeters >= 1_000) {
         String.format(Locale.KOREAN, "%.1fkm", distanceMeters / 1_000.0)
     } else {
@@ -1427,48 +1691,39 @@ private fun formatDistance(distanceMeters: Int?): String {
     }
 }
 
-private fun formatCount(count: Int?): String {
-    return count?.let { "${it}곳" } ?: "계산 중"
-}
-
-private fun formatStreetlightCount(lampCount: Int?, locationCount: Int?): String {
-    if (lampCount == null || locationCount == null) return "계산 중"
-    return "${lampCount}등 (${locationCount}지점)"
-}
-
-private fun CctvSafeRouteAnalysis.coveragePercent(): Int {
-    return (estimatedCoverageRatio * 100).toInt().coerceIn(0, 100)
-}
-
-private fun CctvSafeRouteAnalysis.streetlightCoveragePercent(): String {
-    return estimatedStreetlightCoverageRatio
-        ?.let { "${(it * 100).toInt().coerceIn(0, 100)}%" }
-        ?: "계산 중"
-}
-
-private fun CctvSafeRouteAnalysis.detourDistanceMeters(): Int? {
-    val generalDistance = generalDistanceMeters ?: return null
-    val safeDistance = safeDistanceMeters ?: return null
-    return safeDistance - generalDistance
-}
-
-private fun CctvSafeRouteAnalysis.explanation(): String {
-    if (selectedWaypointCount == 0) {
-        return "일반 경로도 CCTV 인접 후보가 충분해 추가 우회 없이 안내합니다."
-    }
-    val detourDistance = detourDistanceMeters()
-        ?: return "CCTV와 가로등이 가까운 구간을 우선해 참고 경로를 구성했습니다."
+private fun formatRouteDistanceDelta(deltaMeters: Int): String {
     return when {
-        detourDistance > 80 -> {
-            "공공데이터 인접도를 우선해 일반 경로보다 약 ${formatDistance(detourDistance)} 우회합니다."
-        }
-        detourDistance >= 0 -> {
-            "거리 차이가 크지 않아 CCTV와 가로등이 가까운 길을 우선합니다."
-        }
-        else -> {
-            "거리 손해 없이 CCTV와 가로등이 가까운 길을 선택했습니다."
-        }
+        deltaMeters > 0 -> "일반 경로보다 ${formatRouteDistance(deltaMeters)} 더 깁니다."
+        deltaMeters < 0 -> "일반 경로보다 ${formatRouteDistance(-deltaMeters)} 더 짧습니다."
+        else -> "일반 경로와 거리가 같습니다."
     }
+}
+
+private fun walkingMinutes(distanceMeters: Int): Int {
+    return (distanceMeters / 80f).toInt().coerceAtLeast(1)
+}
+
+private fun shouldUpdateCoordinate(
+    lastLatitude: Double?,
+    lastLongitude: Double?,
+    latitude: Double,
+    longitude: Double,
+    minDistanceMeters: Float
+): Boolean {
+    if (lastLatitude == null || lastLongitude == null) return true
+    return calculateDistanceMeters(
+        startLatitude = lastLatitude,
+        startLongitude = lastLongitude,
+        endLatitude = latitude,
+        endLongitude = longitude
+    ) >= minDistanceMeters
+}
+
+private fun quantizeBearingDegrees(bearingDegrees: Float): Int {
+    if (bearingDegrees.isNaN()) return 0
+    val bucketDegrees = (normalizeDegrees(bearingDegrees) / CURRENT_LOCATION_BEARING_BUCKET_DEGREES)
+        .roundToInt() * CURRENT_LOCATION_BEARING_BUCKET_DEGREES
+    return bucketDegrees % 360
 }
 
 private fun createCurrentLocationIcon(bearingDegrees: Float): Bitmap {
@@ -1502,12 +1757,12 @@ private fun createCurrentLocationIcon(bearingDegrees: Float): Bitmap {
 private fun createCurrentLocationMarker(
     latitude: Double,
     longitude: Double,
-    bearingDegrees: Float
+    icon: Bitmap
 ): TMapMarkerItem {
     return TMapMarkerItem().apply {
         setId(CURRENT_LOCATION_MARKER_ID)
         setTMapPoint(TMapPoint(latitude, longitude))
-        setIcon(createCurrentLocationIcon(bearingDegrees))
+        setIcon(icon)
         setPosition(0.5f, 0.5f)
         setVisible(true)
     }
@@ -1934,6 +2189,230 @@ private fun findPedestrianRouteDistance(
     }
 }
 
+private fun findCctvSafeRouteDistancePreview(
+    view: TMapView,
+    startPoint: TMapPoint,
+    destinationPoint: TMapPoint,
+    destinationAddress: String,
+    generalDistanceMeters: Int?,
+    onProgress: (String) -> Unit,
+    onCompleted: (CctvSafeRouteDistancePreview) -> Unit,
+    onFailed: (String) -> Unit
+) {
+    onProgress("현재 위치 주변 CCTV를 찾는 중입니다.")
+    findAddressForPoint(startPoint) { startAddress ->
+        CctvRepository(view.context).loadCoordinates(
+            addressHints = listOf(startAddress, destinationAddress).filter(String::isNotBlank),
+            hasEnoughCoordinates = { coordinates ->
+                CctvSafeRoutePlanner.countRelevantCoordinates(
+                    startLatitude = startPoint.latitude,
+                    startLongitude = startPoint.longitude,
+                    destinationLatitude = destinationPoint.latitude,
+                    destinationLongitude = destinationPoint.longitude,
+                    cctvCoordinates = coordinates
+                ) >= MIN_RELEVANT_CCTV_COORDINATE_COUNT_FOR_A_STAR
+            },
+            onProgress = onProgress,
+            onCompleted = { coordinates ->
+                onProgress("가로등 정보를 경로 점수에 반영하는 중입니다.")
+                val completeWithStreetlights = { streetlightCoordinates: List<StreetlightCoordinate> ->
+                    val plan = CctvSafeRoutePlanner.plan(
+                        startLatitude = startPoint.latitude,
+                        startLongitude = startPoint.longitude,
+                        destinationLatitude = destinationPoint.latitude,
+                        destinationLongitude = destinationPoint.longitude,
+                        cctvCoordinates = coordinates,
+                        streetlightCoordinates = streetlightCoordinates,
+                        maxWaypointCount = MAX_CCTV_WAYPOINT_COUNT
+                    )
+                    if (plan.waypoints.isEmpty()) {
+                        if (generalDistanceMeters != null) {
+                            onCompleted(
+                                CctvSafeRouteDistancePreview(
+                                    distanceMeters = generalDistanceMeters,
+                                    waypointCount = 0,
+                                    candidateCctvCount = plan.candidateCctvCount
+                                )
+                            )
+                        } else {
+                            findPedestrianRouteDistance(
+                                view = view,
+                                startPoint = startPoint,
+                                destinationPoint = destinationPoint
+                            ) { fallbackDistanceMeters ->
+                                onCompleted(
+                                    CctvSafeRouteDistancePreview(
+                                        distanceMeters = fallbackDistanceMeters,
+                                        waypointCount = 0,
+                                        candidateCctvCount = plan.candidateCctvCount
+                                    )
+                                )
+                            }
+                        }
+                    } else {
+                        onProgress("CCTV가 가까운 구간의 실제 보행 거리를 계산하는 중입니다.")
+                        findSegmentedPedestrianRouteDistance(
+                            view = view,
+                            routeStops = listOf(startPoint) +
+                                plan.waypoints.map { coordinate ->
+                                    TMapPoint(coordinate.latitude, coordinate.longitude)
+                                } +
+                                destinationPoint
+                        ) { distanceMeters ->
+                            onCompleted(
+                                CctvSafeRouteDistancePreview(
+                                    distanceMeters = distanceMeters,
+                                    waypointCount = plan.waypoints.size,
+                                    candidateCctvCount = plan.candidateCctvCount
+                                )
+                            )
+                        }
+                    }
+                }
+                StreetlightRepository(view.context).loadCoordinates(
+                    onCompleted = completeWithStreetlights,
+                    onFailed = { error ->
+                        Log.w(TMAP_LOG_TAG, "Failed to load streetlights for preview: $error")
+                        completeWithStreetlights(emptyList())
+                    }
+                )
+            },
+            onFailed = onFailed
+        )
+    }
+}
+
+private fun findSegmentedPedestrianRouteDistance(
+    view: TMapView,
+    routeStops: List<TMapPoint>,
+    onCompleted: (Int?) -> Unit
+) {
+    if (routeStops.size < 2) {
+        onCompleted(null)
+        return
+    }
+
+    var segmentIndex = 0
+    var totalDistanceMeters = 0
+
+    fun requestNextSegment() {
+        if (segmentIndex >= routeStops.lastIndex) {
+            onCompleted(totalDistanceMeters)
+            return
+        }
+        val segmentStart = routeStops[segmentIndex]
+        val segmentEnd = routeStops[segmentIndex + 1]
+        runCatching {
+            TMapData().findPathDataWithType(
+                TMapData.TMapPathType.PEDESTRIAN_PATH,
+                segmentStart,
+                segmentEnd,
+                object : TMapData.OnFindPathDataWithTypeListener {
+                    override fun onFindPathDataWithType(
+                        polyLine: com.skt.tmap.overlay.TMapPolyLine?
+                    ) {
+                        view.post {
+                            if (polyLine == null || polyLine.linePointList.isEmpty()) {
+                                onCompleted(null)
+                                return@post
+                            }
+                            totalDistanceMeters += calculatePolylineDistanceMeters(polyLine)
+                            segmentIndex += 1
+                            requestNextSegment()
+                        }
+                    }
+                }
+            )
+        }.onFailure { error ->
+            Log.w(TMAP_LOG_TAG, "Failed to calculate segmented route distance.", error)
+            view.post { onCompleted(null) }
+        }
+    }
+
+    requestNextSegment()
+}
+
+private fun findAndShowSegmentedPedestrianRoute(
+    view: TMapView,
+    routeStops: List<TMapPoint>,
+    onRouteSearchCompleted: (Int) -> Unit,
+    onRouteSearchFailed: (String) -> Unit,
+    onRoutePointsChanged: (List<TMapPoint>) -> Unit,
+    onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit,
+    onRouteShown: ((List<TMapPoint>, Int) -> Unit)? = null
+) {
+    if (routeStops.size < 2) {
+        onRouteSearchFailed("경로를 계산할 지점이 부족합니다")
+        return
+    }
+
+    val combinedRoutePoints = ArrayList<TMapPoint>()
+    var segmentIndex = 0
+
+    fun appendSegment(polyLine: com.skt.tmap.overlay.TMapPolyLine): Boolean {
+        val segmentPoints = polyLine.linePointList
+        if (segmentPoints.isEmpty()) return false
+        if (combinedRoutePoints.isEmpty()) {
+            combinedRoutePoints.addAll(segmentPoints)
+        } else {
+            combinedRoutePoints.addAll(segmentPoints.drop(1))
+        }
+        return true
+    }
+
+    fun showCombinedRoute() {
+        val combinedPolyLine = com.skt.tmap.overlay.TMapPolyLine().apply {
+            combinedRoutePoints.forEach(::addLinePoint)
+        }
+        showPedestrianRoute(
+            view = view,
+            polyLine = combinedPolyLine,
+            onRouteSearchCompleted = onRouteSearchCompleted,
+            onRouteSearchFailed = onRouteSearchFailed,
+            onRoutePointsChanged = onRoutePointsChanged,
+            onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged,
+            onRouteShown = onRouteShown
+        )
+    }
+
+    fun requestNextSegment() {
+        if (segmentIndex >= routeStops.lastIndex) {
+            view.post(::showCombinedRoute)
+            return
+        }
+        val segmentStart = routeStops[segmentIndex]
+        val segmentEnd = routeStops[segmentIndex + 1]
+        runCatching {
+            TMapData().findPathDataWithType(
+                TMapData.TMapPathType.PEDESTRIAN_PATH,
+                segmentStart,
+                segmentEnd,
+                object : TMapData.OnFindPathDataWithTypeListener {
+                    override fun onFindPathDataWithType(
+                        polyLine: com.skt.tmap.overlay.TMapPolyLine?
+                    ) {
+                        view.post {
+                            if (polyLine == null || !appendSegment(polyLine)) {
+                                onRouteSearchFailed("경유 구간 경로 검색 결과가 없습니다")
+                                return@post
+                            }
+                            segmentIndex += 1
+                            requestNextSegment()
+                        }
+                    }
+                }
+            )
+        }.onFailure { error ->
+            Log.e(TMAP_LOG_TAG, "Failed to search segmented pedestrian route.", error)
+            view.post {
+                onRouteSearchFailed(error.message ?: "경유 구간 경로를 검색하지 못했습니다")
+            }
+        }
+    }
+
+    requestNextSegment()
+}
+
 private fun findAndShowCctvSafeRoute(
     view: TMapView,
     startPoint: TMapPoint,
@@ -2017,11 +2496,13 @@ private fun findAndShowCctvSafeRoute(
                 clearRouteCctvMarkers(view)
                 clearRouteStreetlightMarkers(view)
                 onCctvWaypointCountChanged(0)
-                if (plan.candidateCctvCount == 0) {
-                    onRouteSearchFailed("경로 주변 CCTV 좌표를 충분히 확보하지 못했습니다")
-                    return@showPlan
-                }
-                onRouteSearchProgress("A* 분석 결과 일반 경로에 추가 우회가 필요하지 않습니다.")
+                onRouteSearchProgress(
+                    if (plan.candidateCctvCount == 0) {
+                        "불필요한 단독 경유 후보를 제외하고 일반 보행 경로를 안내합니다."
+                    } else {
+                        "A* 분석 결과 일반 경로에 추가 우회가 필요하지 않습니다."
+                    }
+                )
                 val analysis = CctvSafeRouteAnalysis(
                     generalDistanceMeters = generalDistanceMeters,
                     safeDistanceMeters = null,
@@ -2093,80 +2574,60 @@ private fun findAndShowCctvSafeRoute(
                 estimatedStreetlightCoverageRatio = plan.estimatedStreetlightCoverageRatio
             )
             onCctvRouteAnalysisChanged(analysis)
-            onRouteSearchProgress("CCTV가 가까운 구간을 반영해 경로를 계산하는 중입니다.")
+            onRouteSearchProgress("CCTV가 가까운 구간을 연결해 우회 경로를 계산하는 중입니다.")
             Log.i(
                 TMAP_LOG_TAG,
-                "Requesting A* CCTV safe route with ${waypoints.size} waypoints. " +
+                "Requesting segmented A* CCTV safe route with ${waypoints.size} waypoints. " +
                     "estimatedDistance=${plan.estimatedDistanceMeters}, " +
                     "coverage=${plan.estimatedCoverageRatio}, " +
                     "candidates=${plan.candidateCctvCount}"
             )
-            runCatching {
-                TMapData().findPathDataWithType(
-                    TMapData.TMapPathType.PEDESTRIAN_PATH,
-                    startPoint,
-                    destinationPoint,
-                    ArrayList(waypoints.map { coordinate ->
+            findAndShowSegmentedPedestrianRoute(
+                view = view,
+                routeStops = listOf(startPoint) +
+                    waypoints.map { coordinate ->
                         TMapPoint(coordinate.latitude, coordinate.longitude)
-                    }),
-                    0,
-                    object : TMapData.OnFindPathDataWithTypeListener {
-                        override fun onFindPathDataWithType(
-                            polyLine: com.skt.tmap.overlay.TMapPolyLine?
-                        ) {
-                            view.post {
-                                showPedestrianRoute(
-                                    view = view,
-                                    polyLine = polyLine,
-                                    onRouteSearchCompleted = { distanceMeters ->
-                                        onRouteSearchCompleted(distanceMeters)
-                                    },
-                                    onRouteSearchFailed = onRouteSearchFailed,
-                                    onRoutePointsChanged = onRoutePointsChanged,
-                                    onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged,
-                                    onRouteShown = { routePoints, distanceMeters ->
-                                        val routeCctvCoordinates = showRouteCctvMarkers(
-                                            view = view,
-                                            routePoints = routePoints,
-                                            coordinates = coordinates
-                                        )
-                                        val routeStreetlightCoordinates = showRouteStreetlightMarkers(
-                                            view = view,
-                                            routePoints = routePoints,
-                                            coordinates = streetlightCoordinates
-                                        )
-                                        onCctvWaypointCountChanged(routeCctvCoordinates.size)
-                                        val updatedAnalysis = analysis.copy(
-                                            safeDistanceMeters = distanceMeters,
-                                            routeCctvCount = routeCctvCoordinates.size,
-                                            routeStreetlightLampCount =
-                                                routeStreetlightCoordinates.sumOf { it.lightCount },
-                                            routeStreetlightLocationCount =
-                                                routeStreetlightCoordinates.size
-                                        )
-                                        onCctvRouteAnalysisChanged(updatedAnalysis)
-                                        refreshRouteCctvMarkers(
-                                            view = view,
-                                            routePoints = routePoints,
-                                            addressHints = listOf(startAddress, destinationAddress)
-                                                .filter(String::isNotBlank),
-                                            analysis = updatedAnalysis,
-                                            onCctvWaypointCountChanged = onCctvWaypointCountChanged,
-                                            onCctvRouteAnalysisChanged = onCctvRouteAnalysisChanged
-                                        )
-                                        onRouteSearchCompleted(distanceMeters)
-                                    }
-                                )
-                            }
-                        }
-                    }
-                )
-            }.onFailure { error ->
-                Log.e(TMAP_LOG_TAG, "Failed to search CCTV safe route.", error)
-                view.post {
-                    onRouteSearchFailed(error.message ?: "CCTV·가로등 참고 경로를 검색하지 못했습니다")
+                    } +
+                    destinationPoint,
+                onRouteSearchCompleted = { distanceMeters ->
+                    onRouteSearchCompleted(distanceMeters)
+                },
+                onRouteSearchFailed = onRouteSearchFailed,
+                onRoutePointsChanged = onRoutePointsChanged,
+                onRouteGuidanceStepsChanged = onRouteGuidanceStepsChanged,
+                onRouteShown = { routePoints, distanceMeters ->
+                    val routeCctvCoordinates = showRouteCctvMarkers(
+                        view = view,
+                        routePoints = routePoints,
+                        coordinates = coordinates
+                    )
+                    val routeStreetlightCoordinates = showRouteStreetlightMarkers(
+                        view = view,
+                        routePoints = routePoints,
+                        coordinates = streetlightCoordinates
+                    )
+                    onCctvWaypointCountChanged(routeCctvCoordinates.size)
+                    val updatedAnalysis = analysis.copy(
+                        safeDistanceMeters = distanceMeters,
+                        routeCctvCount = routeCctvCoordinates.size,
+                        routeStreetlightLampCount =
+                            routeStreetlightCoordinates.sumOf { it.lightCount },
+                        routeStreetlightLocationCount =
+                            routeStreetlightCoordinates.size
+                    )
+                    onCctvRouteAnalysisChanged(updatedAnalysis)
+                    refreshRouteCctvMarkers(
+                        view = view,
+                        routePoints = routePoints,
+                        addressHints = listOf(startAddress, destinationAddress)
+                            .filter(String::isNotBlank),
+                        analysis = updatedAnalysis,
+                        onCctvWaypointCountChanged = onCctvWaypointCountChanged,
+                        onCctvRouteAnalysisChanged = onCctvRouteAnalysisChanged
+                    )
+                    onRouteSearchCompleted(distanceMeters)
                 }
-            }
+            )
             }
             onRouteSearchProgress("가로등 정보를 경로 점수에 반영하는 중입니다.")
             StreetlightRepository(view.context).loadCoordinates(
@@ -2231,6 +2692,7 @@ private fun showPedestrianRoute(
         polyLine.setLineColor(Color.rgb(33, 150, 243))
         polyLine.setLineWidth(8f)
         polyLine.setLineAlpha(220)
+        polyLine.passPointList?.clear()
         view.removeTMapPath()
         view.setTMapPath(polyLine)
         view.fitBounds(view.getBoundsFromPoints(polyLine.linePointList))
@@ -2694,64 +3156,6 @@ private fun searchDestinationPoi(
             onSearchFailed(error.message ?: "unknown error")
         }
     }
-}
-
-@Suppress("DEPRECATION")
-private fun startDeviceHeadingUpdates(
-    context: Context,
-    onHeadingChanged: (Float) -> Unit
-): () -> Unit {
-    val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-        ?: return {}
-    val rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
-        ?: return {}
-    val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    var smoothedHeadingDegrees = Float.NaN
-
-    val listener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent) {
-            val rotationMatrix = FloatArray(9)
-            val orientation = FloatArray(3)
-            SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-            SensorManager.getOrientation(rotationMatrix, orientation)
-
-            val screenRotationDegrees = when (windowManager.defaultDisplay.rotation) {
-                Surface.ROTATION_90 -> 90f
-                Surface.ROTATION_180 -> 180f
-                Surface.ROTATION_270 -> 270f
-                else -> 0f
-            }
-            val headingDegrees = normalizeDegrees(
-                Math.toDegrees(orientation[0].toDouble()).toFloat() + screenRotationDegrees
-            )
-            val headingChange = if (smoothedHeadingDegrees.isNaN()) {
-                360f
-            } else {
-                abs(shortestAngleDifference(smoothedHeadingDegrees, headingDegrees))
-            }
-            if (headingChange < MIN_HEADING_CHANGE_DEGREES) return
-
-            smoothedHeadingDegrees = if (smoothedHeadingDegrees.isNaN()) {
-                headingDegrees
-            } else {
-                normalizeDegrees(
-                    smoothedHeadingDegrees +
-                        shortestAngleDifference(smoothedHeadingDegrees, headingDegrees) *
-                        HEADING_SMOOTHING_FACTOR
-                )
-            }
-            onHeadingChanged(smoothedHeadingDegrees)
-        }
-
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
-    }
-
-    sensorManager.registerListener(
-        listener,
-        rotationVectorSensor,
-        SensorManager.SENSOR_DELAY_UI
-    )
-    return { sensorManager.unregisterListener(listener) }
 }
 
 private fun shortestAngleDifference(fromDegrees: Float, toDegrees: Float): Float {
