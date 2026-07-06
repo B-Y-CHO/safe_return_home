@@ -1,15 +1,18 @@
 package com.bycho.safereturnhome.ui.viewmodel
 
+import android.app.Application
+import android.content.Intent
 import android.location.Location
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import com.bycho.safereturnhome.BuildConfig
+import com.bycho.safereturnhome.service.NavigationService
 import com.bycho.safereturnhome.ui.state.DestinationSearchResult
 import com.bycho.safereturnhome.ui.state.MapUiState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class MapViewModel : ViewModel() {
+class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val hasApiKey = BuildConfig.TMAP_API_KEY.isNotBlank()
 
     private val _uiState = MutableStateFlow(
@@ -126,20 +129,36 @@ class MapViewModel : ViewModel() {
     fun onRouteSearchStarted() {
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = true,
-            routeSearchMessage = null
+            routeSearchMessage = "경로를 검색하는 중입니다."
+        )
+    }
+
+    fun onRouteSearchProgress(message: String) {
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = true,
+            routeSearchMessage = message
         )
     }
 
     fun onRouteSearchCompleted(distanceMeters: Int) {
         val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
         val initialRouteDistanceMeters = _uiState.value.initialRouteDistanceMeters ?: distanceMeters
+        val shouldStartNavigation = !_uiState.value.isNavigationActive
+        val progress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
             routeSearchMessage = "보행자 경로를 지도에 표시했습니다.",
             routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분",
             initialRouteDistanceMeters = initialRouteDistanceMeters,
             remainingRouteDistanceMeters = distanceMeters,
-            routeProgress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
+            routeProgress = progress,
+            isNavigationActive = true
+        )
+        if (shouldStartNavigation) startNavigationService()
+        updateServiceNotification(
+            progress = (progress * 100).toInt(),
+            remainingDistance = distanceMeters,
+            etaMinutes = walkingMinutes
         )
     }
 
@@ -153,11 +172,19 @@ class MapViewModel : ViewModel() {
     fun onRemainingRouteDistanceChanged(distanceMeters: Int) {
         val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
         val initialRouteDistanceMeters = _uiState.value.initialRouteDistanceMeters ?: distanceMeters
+        val progress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
         _uiState.value = _uiState.value.copy(
             routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분",
             remainingRouteDistanceMeters = distanceMeters,
-            routeProgress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
+            routeProgress = progress
         )
+        if (_uiState.value.isNavigationActive) {
+            updateServiceNotification(
+                progress = (progress * 100).toInt(),
+                remainingDistance = distanceMeters,
+                etaMinutes = walkingMinutes
+            )
+        }
     }
 
     fun onRouteRecalculationStarted() {
@@ -167,14 +194,73 @@ class MapViewModel : ViewModel() {
         )
     }
 
+    fun onHazardRerouteStarted(message: String) {
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = true,
+            routeSearchMessage = message
+        )
+    }
+
+    fun onHazardRerouteCompleted(distanceMeters: Int) {
+        onRouteSearchCompleted(distanceMeters)
+        val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
+        _uiState.value = _uiState.value.copy(
+            routeSearchMessage = "위험지점 감지로 우회 경로를 안내합니다.",
+            routeSummary = "위험지점 우회 중 · 남은 경로: ${distanceMeters}m · 약 ${walkingMinutes}분"
+        )
+    }
+
+    fun onHazardRerouteFailed(message: String) {
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = false,
+            routeSearchMessage = message
+        )
+    }
+
     fun onDestinationArrived() {
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
             routeSearchMessage = "목적지에 도착했습니다.",
             routeSummary = "남은 보행 경로: 0m · 예상 도보 시간: 0분",
             remainingRouteDistanceMeters = 0,
-            routeProgress = 1f
+            routeProgress = 1f,
+            isNavigationActive = false
         )
+        stopNavigationService()
+    }
+
+    fun stopNavigation() {
+        if (_uiState.value.isNavigationActive) {
+            _uiState.value = _uiState.value.copy(isNavigationActive = false)
+            stopNavigationService()
+        }
+    }
+
+    private fun startNavigationService() {
+        val application = getApplication<Application>()
+        val intent = Intent(application, NavigationService::class.java).apply {
+            action = NavigationService.ACTION_START
+        }
+        application.startForegroundService(intent)
+    }
+
+    private fun updateServiceNotification(progress: Int, remainingDistance: Int, etaMinutes: Int) {
+        val application = getApplication<Application>()
+        val intent = Intent(application, NavigationService::class.java).apply {
+            action = NavigationService.ACTION_UPDATE
+            putExtra(NavigationService.EXTRA_PROGRESS, progress)
+            putExtra(NavigationService.EXTRA_REMAINING_DISTANCE, remainingDistance)
+            putExtra(NavigationService.EXTRA_ETA_MINUTES, etaMinutes)
+        }
+        application.startService(intent)
+    }
+
+    private fun stopNavigationService() {
+        val application = getApplication<Application>()
+        val intent = Intent(application, NavigationService::class.java).apply {
+            action = NavigationService.ACTION_STOP
+        }
+        application.startService(intent)
     }
 
     private fun calculateRouteProgress(initialDistanceMeters: Int, remainingDistanceMeters: Int): Float {
