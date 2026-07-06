@@ -29,5 +29,6 @@ data class MapUiState(
     val routeSearchMessage: String? = null,
     val initialRouteDistanceMeters: Int? = null,
     val remainingRouteDistanceMeters: Int? = null,
-    val routeProgress: Float = 0f
+    val routeProgress: Float = 0f,
+    val isNavigationActive: Boolean = false
 )

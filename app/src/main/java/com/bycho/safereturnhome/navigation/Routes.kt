@@ -1,7 +1,12 @@
 package com.bycho.safereturnhome.navigation
 
 sealed class Routes(val route: String) {
+    data object Auth : Routes("auth")
     data object Home : Routes("home")
-    data object Map : Routes("map")
+    data object GuardianSettings : Routes("guardian-settings")
+    data object ServerSettings : Routes("server-settings")
+    data object Map : Routes("map") {
+        const val deepLinkUri = "safereturnhome://map"
+    }
     data object Trip : Routes("trip")
 }
