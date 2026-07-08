@@ -23,6 +23,7 @@ data class SignalStatusResult(
     val errorMessage: String? = null
 )
 
+@Deprecated("Legacy creative-design client. Use EventHttpClient/FastApiDangerEventSource.")
 class RaspberryPiHttpClient {
     fun checkConnection(serverAddress: String): HttpConnectionResult {
         var connection: HttpURLConnection? = null

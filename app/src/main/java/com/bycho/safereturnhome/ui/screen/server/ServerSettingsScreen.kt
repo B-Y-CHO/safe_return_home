@@ -28,57 +28,49 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.bycho.safereturnhome.R
+import com.bycho.safereturnhome.data.DEFAULT_EVENT_SERVER_ADDRESS
 import com.bycho.safereturnhome.data.ServerPreferences
 import com.bycho.safereturnhome.data.normalizeServerAddress
 import com.bycho.safereturnhome.data.serverAddressError
-import com.bycho.safereturnhome.network.RaspberryPiHttpClient
-import kotlinx.coroutines.Dispatchers
+import com.bycho.safereturnhome.network.EventHttpClient
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import androidx.compose.runtime.rememberCoroutineScope
 
 @Composable
-fun ServerSettingsRoute(
-    onBackClick: () -> Unit
-) {
+fun ServerSettingsRoute(onBackClick: () -> Unit) {
     val context = LocalContext.current
-    val serverPreferences = remember(context) { ServerPreferences(context) }
-    val httpClient = remember { RaspberryPiHttpClient() }
-    val coroutineScope = rememberCoroutineScope()
-    var serverAddress by remember { mutableStateOf(serverPreferences.getServerAddress()) }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
-    var isTestingConnection by remember { mutableStateOf(false) }
-    val addressError = serverAddressError(serverAddress)
+    val preferences = remember(context) { ServerPreferences(context) }
+    val scope = rememberCoroutineScope()
+    var address by remember { mutableStateOf(preferences.getServerAddress()) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var testing by remember { mutableStateOf(false) }
+    val error = serverAddressError(address)
 
     ServerSettingsScreen(
-        serverAddress = serverAddress,
-        serverAddressError = addressError,
-        statusMessage = statusMessage,
-        isTestingConnection = isTestingConnection,
-        onServerAddressChanged = {
-            serverAddress = it
-            statusMessage = null
-        },
+        serverAddress = address,
+        serverAddressError = error,
+        statusMessage = status,
+        isTestingConnection = testing,
+        onServerAddressChanged = { address = it; status = null },
+        onUseEmulatorDefault = { address = DEFAULT_EVENT_SERVER_ADDRESS; status = null },
         onSaveClick = {
-            serverAddress = normalizeServerAddress(serverAddress)
-            serverPreferences.saveServerAddress(serverAddress)
-            statusMessage = "서버 주소를 저장했습니다."
+            address = normalizeServerAddress(address)
+            preferences.saveServerAddress(address)
+            status = "서버 주소를 저장했습니다."
         },
         onTestConnectionClick = {
-            serverAddress = normalizeServerAddress(serverAddress)
-            serverPreferences.saveServerAddress(serverAddress)
-            val addressToTest = serverAddress
-            isTestingConnection = true
-            statusMessage = null
-            coroutineScope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    httpClient.testWebSocketConnection(addressToTest)
-                }
-                isTestingConnection = false
-                statusMessage = if (result.isSuccessful) {
-                    "연결 성공: ${result.message}"
-                } else {
-                    "연결 실패: ${result.message}"
+            address = normalizeServerAddress(address)
+            if (address.isBlank()) {
+                status = "서버 주소를 입력해 주세요."
+            } else {
+                preferences.saveServerAddress(address)
+                testing = true
+                scope.launch {
+                    status = runCatching { EventHttpClient(address).checkServer() }
+                        .fold(
+                            onSuccess = { "연결 성공: FastAPI 서버가 응답했습니다." },
+                            onFailure = { "연결 실패: ${it.message}" }
+                        )
+                    testing = false
                 }
             }
         },
@@ -94,6 +86,7 @@ fun ServerSettingsScreen(
     statusMessage: String?,
     isTestingConnection: Boolean,
     onServerAddressChanged: (String) -> Unit,
+    onUseEmulatorDefault: () -> Unit,
     onSaveClick: () -> Unit,
     onTestConnectionClick: () -> Unit,
     onBackClick: () -> Unit
@@ -101,63 +94,52 @@ fun ServerSettingsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("서버 설정") },
+                title = { Text("이벤트 서버 설정") },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_arrow_back),
-                            contentDescription = "뒤로 가기"
-                        )
+                        Icon(painterResource(R.drawable.ic_arrow_back), "뒤로 가기")
                     }
                 }
             )
         }
-    ) { innerPadding ->
+    ) { padding ->
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(24.dp),
+            Modifier.fillMaxSize().padding(padding).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(
-                text = "라즈베리파이 서버의 기본 주소(웹소켓/HTTP)를 입력하세요.",
-                style = MaterialTheme.typography.bodyLarge
-            )
+            Text("FastAPI 서버의 HTTP 기본 주소를 입력하세요. WebSocket /ws 주소는 자동 생성됩니다.")
             OutlinedTextField(
                 modifier = Modifier.fillMaxWidth(),
                 value = serverAddress,
                 onValueChange = onServerAddressChanged,
                 label = { Text("서버 주소") },
-                placeholder = {
-                    Text("ws://[2001:db8::1]:8000/ws")
-                },
+                placeholder = { Text(DEFAULT_EVENT_SERVER_ADDRESS) },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 isError = serverAddress.isNotBlank() && serverAddressError != null,
                 supportingText = {
-                    if (serverAddress.isNotBlank() && serverAddressError != null) {
-                        Text(serverAddressError)
-                    }
+                    if (serverAddress.isBlank()) Text("주소가 비어 있으면 서버에 연결하지 않습니다.")
+                    else serverAddressError?.let { Text(it) }
                 },
                 singleLine = true
             )
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onUseEmulatorDefault
+            ) {
+                Text("에뮬레이터 기본 주소 사용")
+            }
             Button(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = serverAddressError == null && !isTestingConnection,
                 onClick = onSaveClick
-            ) {
-                Text("서버 주소 저장")
-            }
+            ) { Text("서버 주소 저장") }
             OutlinedButton(
                 modifier = Modifier.fillMaxWidth(),
                 enabled = serverAddressError == null && !isTestingConnection,
                 onClick = onTestConnectionClick
-            ) {
-                Text(if (isTestingConnection) "연결 확인 중..." else "웹소켓 연결 테스트")
-            }
-            statusMessage?.let {
-                Text(text = it, color = MaterialTheme.colorScheme.primary)
-            }
+            ) { Text(if (isTestingConnection) "연결 확인 중…" else "HTTP 연결 테스트") }
+            statusMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+            Text("실제 스마트폰: PC와 같은 Wi-Fi에서 http://PC_IP:8000", style = MaterialTheme.typography.bodySmall)
         }
     }
 }

@@ -110,9 +110,11 @@ fun SafeReturnHomeNavGraph(
         ) {
             if (authUiState.isSignedIn) {
                 MapRoute(
+                    dangerZones = signalPollingUiState.dangerZones,
                     dangerZone = signalPollingUiState.latestDangerZone,
                     dangerZoneEventVersion = signalPollingUiState.dangerZoneEventVersion,
                     signalPollingUiState = signalPollingUiState,
+                    onUavEscortRequested = signalPollingViewModel::requestUavEscort,
                     onBackClick = { navController.popBackStack() },
                     onNavigationFinished = {
                         navController.navigate(Routes.Home.route) {

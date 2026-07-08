@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.callbackFlow
 
 private const val SERVER_PREFERENCES_NAME = "server-preferences"
 private const val SERVER_ADDRESS_KEY = "server-address"
+const val DEFAULT_EVENT_SERVER_ADDRESS = "http://10.0.2.2:8000"
 
 class ServerPreferences(context: Context) {
     private val preferences = context.getSharedPreferences(
@@ -16,7 +17,11 @@ class ServerPreferences(context: Context) {
     )
 
     fun getServerAddress(): String {
-        return preferences.getString(SERVER_ADDRESS_KEY, "").orEmpty()
+        return if (preferences.contains(SERVER_ADDRESS_KEY)) {
+            preferences.getString(SERVER_ADDRESS_KEY, "").orEmpty()
+        } else {
+            DEFAULT_EVENT_SERVER_ADDRESS
+        }
     }
 
     fun saveServerAddress(serverAddress: String) {

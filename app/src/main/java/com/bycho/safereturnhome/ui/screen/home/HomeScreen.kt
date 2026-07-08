@@ -37,6 +37,9 @@ import com.bycho.safereturnhome.data.RecentDestinationPreferences
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private const val SHOW_SERVER_CONTROLS = true
 
@@ -196,6 +199,19 @@ fun HomeScreen(
                     ) {
                         Text(text = "AI 서버 안전 상태")
                         Text(text = signalPollingUiState.statusMessage)
+                        Text(
+                            text = if (signalPollingUiState.isConnected) "연결됨" else "연결 안 됨",
+                            color = if (signalPollingUiState.isConnected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            }
+                        )
+                        Text(text = "현재 위험구역: ${signalPollingUiState.dangerZones.size}개")
+                        signalPollingUiState.lastEventReceivedAtMillis?.let { receivedAt ->
+                            Text(text = "마지막 이벤트: ${formatEventTime(receivedAt)}")
+                        }
+                        signalPollingUiState.escortStatusMessage?.let { Text(it) }
                         signalPollingUiState.latestStatus?.let {
                             Text(text = "현재 상태: $it")
                         }
@@ -228,6 +244,9 @@ fun HomeScreen(
         }
     }
 }
+
+private fun formatEventTime(timestampMillis: Long): String =
+    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(timestampMillis))
 
 @Composable
 private fun HomeStatusCard(

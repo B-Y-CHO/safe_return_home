@@ -11,6 +11,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
 
+@Deprecated("Legacy Raspberry Pi transport. Use EventWebSocketClient.")
 class RaspberryWebSocketManager(
     private val okHttpClient: OkHttpClient = OkHttpClient()
 ) {

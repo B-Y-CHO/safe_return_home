@@ -93,6 +93,7 @@ import com.bycho.safereturnhome.data.CctvRepository
 import com.bycho.safereturnhome.data.CctvSafeRoutePlan
 import com.bycho.safereturnhome.data.CctvSafeRoutePlanner
 import com.bycho.safereturnhome.data.DangerZone
+import com.bycho.safereturnhome.data.DangerZoneType
 import com.bycho.safereturnhome.data.GuardianPreferences
 import com.bycho.safereturnhome.data.RecentDestinationPreferences
 import com.bycho.safereturnhome.data.RouteCoordinate
@@ -127,8 +128,8 @@ private const val CURRENT_LOCATION_ACCURACY_CIRCLE_ID = "current-location-accura
 private const val CURRENT_LOCATION_MARKER_ID = "current-location-marker"
 private const val DESTINATION_MARKER_ID = "destination-marker"
 private const val PEDESTRIAN_ROUTE_ID = "pedestrian-route"
-private const val DANGER_ZONE_MARKER_ID = "danger-zone-marker"
-private const val DANGER_ZONE_CIRCLE_ID = "danger-zone-circle"
+private const val DANGER_ZONE_MARKER_PREFIX = "danger-zone-marker-"
+private const val DANGER_ZONE_CIRCLE_PREFIX = "danger-zone-"
 private const val ESTIMATED_WALKING_METERS_PER_SECOND = 1.33
 private const val ROUTE_CCTV_MARKER_ID_PREFIX = "route-cctv-"
 private const val ROUTE_STREETLIGHT_MARKER_ID_PREFIX = "route-streetlight-"
@@ -285,9 +286,11 @@ private data class SmsSendRequest(
 
 @Composable
 fun MapRoute(
+    dangerZones: List<DangerZone>,
     dangerZone: DangerZone?,
     dangerZoneEventVersion: Long,
     signalPollingUiState: SignalPollingUiState,
+    onUavEscortRequested: (Double, Double) -> Unit,
     onBackClick: () -> Unit,
     onNavigationFinished: () -> Unit,
     viewModel: MapViewModel = viewModel()
@@ -295,9 +298,11 @@ fun MapRoute(
     val uiState by viewModel.uiState.collectAsState()
     MapScreen(
         uiState = uiState,
+        dangerZones = dangerZones,
         dangerZone = dangerZone,
         dangerZoneEventVersion = dangerZoneEventVersion,
         signalPollingUiState = signalPollingUiState,
+        onUavEscortRequested = onUavEscortRequested,
         onBackClick = {
             viewModel.stopNavigation()
             onBackClick()
@@ -333,9 +338,11 @@ fun MapRoute(
 @Composable
 fun MapScreen(
     uiState: MapUiState,
+    dangerZones: List<DangerZone>,
     dangerZone: DangerZone?,
     dangerZoneEventVersion: Long,
     signalPollingUiState: SignalPollingUiState,
+    onUavEscortRequested: (Double, Double) -> Unit,
     onBackClick: () -> Unit,
     onNavigationFinished: () -> Unit,
     onMapReady: () -> Unit,
@@ -406,6 +413,20 @@ fun MapScreen(
 
     BackHandler(enabled = true) {
         onBackClick()
+    }
+
+    LaunchedEffect(tMapView, dangerZones) {
+        val view = tMapView ?: return@LaunchedEffect
+        dangerZones.forEach { showDangerZone(view, it) }
+    }
+
+    LaunchedEffect(dangerZones, activeRoutePoints, isNavigationMode) {
+        if (!isNavigationMode || activeRoutePoints.isEmpty()) return@LaunchedEffect
+        val route = activeRoutePoints.map(TMapPoint::toRouteCoordinate)
+        if (dangerZones.any { RouteRerouteHelper.routeIntersectsDangerZone(route, it) }) {
+            hazardNoticeMessage =
+                "현재 경로에 위험구역이 포함되어 있습니다. 안전경로 재탐색이 필요합니다."
+        }
     }
 
     val sendSosMessage: () -> Unit = {
@@ -867,8 +888,8 @@ fun MapScreen(
         hazardRerouteRequestId += 1
         val requestId = hazardRerouteRequestId
         isRouteRecalculationInProgress = true
-        hazardNoticeMessage = "위험지점을 감지해 우회 경로를 찾는 중입니다."
-        onHazardRerouteStarted("위험지점을 감지해 우회 경로를 찾는 중입니다.")
+        hazardNoticeMessage = "현재 경로에 위험구역이 포함되어 있습니다. 안전경로 재탐색이 필요합니다. 재탐색 중입니다."
+        onHazardRerouteStarted("현재 경로에 위험구역이 포함되어 있습니다. 안전경로 재탐색이 필요합니다.")
         findBestHazardAvoidingRoute(
             view = view,
             startPoint = TMapPoint(currentLatitude, currentLongitude),
@@ -1206,6 +1227,32 @@ fun MapScreen(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.primary
                                 )
+                                Text(
+                                    text = "위험구역 ${signalPollingUiState.dangerZones.size}개",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                signalPollingUiState.latestDangerZone?.let { zone ->
+                                    Text(
+                                        text = "${zone.message} (반경 ${zone.radiusMeters.toInt()}m)",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                Button(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = uiState.currentLatitude != null &&
+                                        uiState.currentLongitude != null,
+                                    onClick = {
+                                        onUavEscortRequested(
+                                            uiState.currentLatitude!!,
+                                            uiState.currentLongitude!!
+                                        )
+                                    }
+                                ) {
+                                    Text("UAV 안심귀가 요청")
+                                }
+                                signalPollingUiState.escortStatusMessage?.let {
+                                    Text(it, style = MaterialTheme.typography.bodySmall)
+                                }
                                 hazardNoticeMessage?.let { notice ->
                                     Text(
                                         text = notice,
@@ -2059,23 +2106,36 @@ private fun createDestinationIcon(): Bitmap {
 
 private fun showDangerZone(view: TMapView, dangerZone: DangerZone) {
     runCatching {
-        view.removeTMapMarkerItem(DANGER_ZONE_MARKER_ID)
-        view.removeTMapCircle(DANGER_ZONE_CIRCLE_ID)
+        val safeId = dangerZone.id.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val markerId = "$DANGER_ZONE_MARKER_PREFIX$safeId"
+        val circleId = "$DANGER_ZONE_CIRCLE_PREFIX$safeId"
+        val areaColor = if (dangerZone.type == DangerZoneType.LAMP_FAULT) {
+            Color.rgb(255, 193, 7)
+        } else {
+            Color.rgb(244, 67, 54)
+        }
+        val lineColor = if (dangerZone.type == DangerZoneType.LAMP_FAULT) {
+            Color.rgb(245, 124, 0)
+        } else {
+            Color.rgb(198, 40, 40)
+        }
+        view.removeTMapMarkerItem(markerId)
+        view.removeTMapCircle(circleId)
         view.addTMapCircle(
             TMapCircle().apply {
-                setId(DANGER_ZONE_CIRCLE_ID)
+                setId(circleId)
                 setCenterPoint(TMapPoint(dangerZone.latitude, dangerZone.longitude))
                 setRadius(dangerZone.radiusMeters)
-                setAreaColor(Color.rgb(244, 67, 54))
+                setAreaColor(areaColor)
                 setAreaAlpha(45)
-                setLineColor(Color.rgb(198, 40, 40))
+                setLineColor(lineColor)
                 setLineAlpha(190)
                 setCircleWidth(3f)
             }
         )
         view.addTMapMarkerItem(
             TMapMarkerItem().apply {
-                setId(DANGER_ZONE_MARKER_ID)
+                setId(markerId)
                 setTMapPoint(TMapPoint(dangerZone.latitude, dangerZone.longitude))
                 setIcon(createDangerZoneIcon())
                 setPosition(0.5f, 0.5f)
