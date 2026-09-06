@@ -5,12 +5,9 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import org.json.JSONObject
 import java.io.IOException
 
 class EventHttpClient(
@@ -21,21 +18,8 @@ class EventHttpClient(
         Request.Builder().url(endpoint("danger-zones")).get().build()
     ).let(::parseDangerZoneList)
 
-    suspend fun requestUavEscort(latitude: Double, longitude: Double): EscortResponse {
-        val body = JSONObject()
-            .put("latitude", latitude)
-            .put("longitude", longitude)
-            .toString()
-            .toRequestBody(JSON_MEDIA_TYPE)
-        val response = JSONObject(
-            execute(Request.Builder().url(endpoint("escort/request")).post(body).build())
-        )
-        return EscortResponse(
-            requestId = response.optString("requestId"),
-            status = response.optString("status"),
-            robotId = response.optString("robotId"),
-            message = response.optString("message")
-        )
+    suspend fun clearDangerZones() {
+        execute(Request.Builder().url(endpoint("danger-zones")).delete().build())
     }
 
     suspend fun checkServer(): String = execute(
@@ -77,7 +61,4 @@ class EventHttpClient(
         })
     }
 
-    private companion object {
-        val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-    }
 }

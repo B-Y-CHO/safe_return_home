@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.callbackFlow
 
 private const val SERVER_PREFERENCES_NAME = "server-preferences"
 private const val SERVER_ADDRESS_KEY = "server-address"
-const val DEFAULT_EVENT_SERVER_ADDRESS = "http://10.0.2.2:8000"
+const val DEFAULT_EVENT_SERVER_ADDRESS = "http://192.168.0.66:8000"
 
 class ServerPreferences(context: Context) {
     private val preferences = context.getSharedPreferences(

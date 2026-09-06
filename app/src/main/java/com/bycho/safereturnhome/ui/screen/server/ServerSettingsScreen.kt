@@ -126,7 +126,7 @@ fun ServerSettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = onUseEmulatorDefault
             ) {
-                Text("에뮬레이터 기본 주소 사용")
+                Text("실기기 기본 주소 사용")
             }
             Button(
                 modifier = Modifier.fillMaxWidth(),
@@ -139,7 +139,7 @@ fun ServerSettingsScreen(
                 onClick = onTestConnectionClick
             ) { Text(if (isTestingConnection) "연결 확인 중…" else "HTTP 연결 테스트") }
             statusMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
-            Text("실제 스마트폰: PC와 같은 Wi-Fi에서 http://PC_IP:8000", style = MaterialTheme.typography.bodySmall)
+            Text("실제 스마트폰: PC와 같은 Wi-Fi에서 $DEFAULT_EVENT_SERVER_ADDRESS", style = MaterialTheme.typography.bodySmall)
         }
     }
 }

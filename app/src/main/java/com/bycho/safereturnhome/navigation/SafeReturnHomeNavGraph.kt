@@ -12,6 +12,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navDeepLink
+import com.bycho.safereturnhome.FeatureFlags
+import com.bycho.safereturnhome.ui.state.SignalPollingUiState
 import com.bycho.safereturnhome.ui.screen.auth.AuthRoute
 import com.bycho.safereturnhome.ui.screen.guardian.GuardianSettingsRoute
 import com.bycho.safereturnhome.ui.screen.home.HomeRoute
@@ -32,9 +34,14 @@ fun SafeReturnHomeNavGraph(
     val mapViewModel: MapViewModel = viewModel()
     val authUiState by authViewModel.uiState.collectAsState()
     val signalPollingUiState by signalPollingViewModel.uiState.collectAsState()
+    val visibleSignalPollingUiState = if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
+        signalPollingUiState
+    } else {
+        SignalPollingUiState()
+    }
 
     LaunchedEffect(lifecycleOwner, signalPollingViewModel, authUiState.isSignedIn) {
-        if (authUiState.isSignedIn) {
+        if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES && authUiState.isSignedIn) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 signalPollingViewModel.pollSignals()
             }
@@ -64,7 +71,9 @@ fun SafeReturnHomeNavGraph(
                     navController.navigate(Routes.GuardianSettings.route)
                 },
                 onServerSettingsClick = {
-                    navController.navigate(Routes.ServerSettings.route)
+                    if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
+                        navController.navigate(Routes.ServerSettings.route)
+                    }
                 },
                 onLogoutClick = {
                     mapViewModel.stopNavigation()
@@ -74,7 +83,7 @@ fun SafeReturnHomeNavGraph(
                         launchSingleTop = true
                     }
                 },
-                signalPollingUiState = signalPollingUiState,
+                signalPollingUiState = visibleSignalPollingUiState,
                 mapViewModel = mapViewModel
             )
         }
@@ -91,7 +100,14 @@ fun SafeReturnHomeNavGraph(
             }
         }
         composable(Routes.ServerSettings.route) {
-            if (authUiState.isSignedIn) {
+            if (!FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
+                LaunchedEffect(Unit) {
+                    navController.navigate(Routes.Home.route) {
+                        popUpTo(Routes.ServerSettings.route) { inclusive = true }
+                        launchSingleTop = true
+                    }
+                }
+            } else if (authUiState.isSignedIn) {
                 ServerSettingsRoute(onBackClick = { navController.popBackStack() })
             } else {
                 LaunchedEffect(Unit) {
@@ -110,11 +126,10 @@ fun SafeReturnHomeNavGraph(
         ) {
             if (authUiState.isSignedIn) {
                 MapRoute(
-                    dangerZones = signalPollingUiState.dangerZones,
-                    dangerZone = signalPollingUiState.latestDangerZone,
-                    dangerZoneEventVersion = signalPollingUiState.dangerZoneEventVersion,
-                    signalPollingUiState = signalPollingUiState,
-                    onUavEscortRequested = signalPollingViewModel::requestUavEscort,
+                    dangerZones = visibleSignalPollingUiState.dangerZones,
+                    dangerZone = visibleSignalPollingUiState.latestDangerZone,
+                    dangerZoneEventVersion = visibleSignalPollingUiState.dangerZoneEventVersion,
+                    signalPollingUiState = visibleSignalPollingUiState,
                     onBackClick = { navController.popBackStack() },
                     onNavigationFinished = {
                         navController.navigate(Routes.Home.route) {

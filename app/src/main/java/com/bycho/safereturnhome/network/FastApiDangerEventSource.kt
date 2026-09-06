@@ -8,6 +8,5 @@ class FastApiDangerEventSource(
 
     override fun observeDangerZones() = webSocketClient.observe()
     override suspend fun fetchDangerZones() = httpClient.fetchDangerZones()
-    override suspend fun requestUavEscort(latitude: Double, longitude: Double) =
-        httpClient.requestUavEscort(latitude, longitude)
+    override suspend fun clearDangerZones() = httpClient.clearDangerZones()
 }

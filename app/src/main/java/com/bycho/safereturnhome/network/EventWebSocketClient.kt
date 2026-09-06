@@ -22,9 +22,9 @@ class EventWebSocketClient(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                runCatching { parseDangerEventMessage(text) }
-                    .onSuccess { zone ->
-                        if (zone != null) trySend(DangerEventUpdate.DangerZoneCreated(zone))
+                runCatching { parseEventMessage(text) }
+                    .onSuccess { update ->
+                        if (update != null) trySend(update)
                     }
                     .onFailure { trySend(DangerEventUpdate.Failed("이벤트 JSON 파싱 실패", it)) }
             }

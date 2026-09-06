@@ -1,6 +1,6 @@
-# FastAPI UGV/UAV 이벤트 mock 서버
+# FastAPI 이벤트 mock 서버
 
-Gazebo/ROS2 없이 Android 앱의 위험 이벤트 수신과 UAV 동행 요청을 검증하는 서버입니다. 데이터는 메모리에 저장되므로 서버를 재시작하면 초기화됩니다.
+Gazebo/ROS2 없이 Android 앱의 위험 이벤트 수신을 검증하는 서버입니다. 데이터는 메모리에 저장되므로 서버를 재시작하면 초기화됩니다.
 
 ## Windows FastAPI 서버 실행
 
@@ -33,8 +33,6 @@ python -m uvicorn main:app --host 0.0.0.0 --port 8000
 - `GET /`: 서버 상태 확인
 - `GET /danger-zones`: 현재 위험구역 목록
 - `POST /events`: 위험 이벤트 저장 및 WebSocket broadcast
-- `POST /escort/request`: UAV 동행 요청 mock
-- `GET /robots`: UGV/UAV 상태 mock
 - `WS /ws`: 실시간 이벤트 스트림
 
 ## PowerShell 이벤트 테스트
@@ -55,14 +53,6 @@ curl.exe -X POST "http://127.0.0.1:8000/events" `
 curl.exe -X POST "http://127.0.0.1:8000/events" `
   -H "Content-Type: application/json" `
   -d "{`"id`":`"danger_001`",`"type`":`"DANGER_EVENT`",`"latitude`":35.82960,`"longitude`":128.53320,`"radiusMeters`":60.0,`"message`":`"위험 이벤트가 감지되어 우회 경로를 안내합니다.`",`"source`":`"UGV_01`",`"severity`":`"HIGH`"}"
-```
-
-### UAV 동행 요청
-
-```powershell
-curl.exe -X POST "http://127.0.0.1:8000/escort/request" `
-  -H "Content-Type: application/json" `
-  -d "{`"latitude`":35.82960,`"longitude`":128.53320}"
 ```
 
 ## 실제 기기 MVP 테스트 완료 내용

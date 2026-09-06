@@ -72,6 +72,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -86,8 +87,14 @@ import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
 import androidx.core.os.CancellationSignal
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.bycho.safereturnhome.FeatureFlags
 import com.bycho.safereturnhome.BuildConfig
 import com.bycho.safereturnhome.R
+import com.bycho.safereturnhome.ai.EmergencyChatTurn
+import com.bycho.safereturnhome.ai.GeminiCloudEmergencyChatClient
+import com.bycho.safereturnhome.ai.EmergencySituationInput
+import com.bycho.safereturnhome.ai.EmergencySituationResult
+import com.bycho.safereturnhome.ai.HybridEmergencySituationAnalyzer
 import com.bycho.safereturnhome.data.CctvCoordinate
 import com.bycho.safereturnhome.data.CctvRepository
 import com.bycho.safereturnhome.data.CctvSafeRoutePlan
@@ -98,10 +105,12 @@ import com.bycho.safereturnhome.data.GuardianPreferences
 import com.bycho.safereturnhome.data.RecentDestinationPreferences
 import com.bycho.safereturnhome.data.RouteCoordinate
 import com.bycho.safereturnhome.data.RouteRerouteHelper
+import com.bycho.safereturnhome.data.ServerPreferences
 import com.bycho.safereturnhome.data.StreetlightCoordinate
 import com.bycho.safereturnhome.data.StreetlightRepository
 import com.bycho.safereturnhome.data.guardianPhoneNumberError
 import com.bycho.safereturnhome.data.isRouteEligibleCandidate
+import com.bycho.safereturnhome.network.FastApiDangerEventSource
 import com.bycho.safereturnhome.ui.state.DestinationSearchResult
 import com.bycho.safereturnhome.ui.state.MapUiState
 import com.bycho.safereturnhome.ui.state.SignalPollingUiState
@@ -117,6 +126,7 @@ import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import org.w3c.dom.Element
@@ -290,7 +300,6 @@ fun MapRoute(
     dangerZone: DangerZone?,
     dangerZoneEventVersion: Long,
     signalPollingUiState: SignalPollingUiState,
-    onUavEscortRequested: (Double, Double) -> Unit,
     onBackClick: () -> Unit,
     onNavigationFinished: () -> Unit,
     viewModel: MapViewModel = viewModel()
@@ -302,7 +311,6 @@ fun MapRoute(
         dangerZone = dangerZone,
         dangerZoneEventVersion = dangerZoneEventVersion,
         signalPollingUiState = signalPollingUiState,
-        onUavEscortRequested = onUavEscortRequested,
         onBackClick = {
             viewModel.stopNavigation()
             onBackClick()
@@ -342,7 +350,6 @@ fun MapScreen(
     dangerZone: DangerZone?,
     dangerZoneEventVersion: Long,
     signalPollingUiState: SignalPollingUiState,
-    onUavEscortRequested: (Double, Double) -> Unit,
     onBackClick: () -> Unit,
     onNavigationFinished: () -> Unit,
     onMapReady: () -> Unit,
@@ -368,7 +375,13 @@ fun MapScreen(
 ) {
     val context = LocalContext.current
     val rootView = LocalView.current
+    val coroutineScope = rememberCoroutineScope()
+    val emergencyAnalyzer = remember { HybridEmergencySituationAnalyzer() }
     val guardianPreferences = remember(context) { GuardianPreferences(context) }
+    val serverPreferences = remember(context) { ServerPreferences(context) }
+    val emergencyChatClient = remember(context) {
+        GeminiCloudEmergencyChatClient(serverPreferences.getServerAddress())
+    }
     val recentDestinationPreferences = remember(context) { RecentDestinationPreferences(context) }
     var recenterRequestId by remember { mutableIntStateOf(0) }
     var destinationFocusRequestId by remember { mutableIntStateOf(0) }
@@ -397,6 +410,7 @@ fun MapScreen(
     var hazardRerouteRequestId by remember { mutableIntStateOf(0) }
     var lastHandledDangerZoneEventVersion by remember { mutableStateOf(0L) }
     var hazardNoticeMessage by remember { mutableStateOf<String?>(null) }
+    var visibleDangerZoneIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var hasArrivedAtDestination by remember { mutableStateOf(false) }
     var isArrivalNoticeVisible by remember { mutableStateOf(false) }
     var isNavigationEndConfirmationVisible by remember { mutableStateOf(false) }
@@ -408,6 +422,11 @@ fun MapScreen(
     }
     var sosCountdownSeconds by remember { mutableStateOf<Int?>(null) }
     var sosNoticeMessage by remember { mutableStateOf<String?>(null) }
+    var latestEmergencyResult by remember { mutableStateOf<EmergencySituationResult?>(null) }
+    var isSosSituationDialogVisible by remember { mutableStateOf(false) }
+    var sosSituationMessage by remember { mutableStateOf("") }
+    var sosChatMessages by remember { mutableStateOf<List<EmergencyChatTurn>>(emptyList()) }
+    var isSosAnalysisInProgress by remember { mutableStateOf(false) }
     var activeSmsRequest by remember { mutableStateOf<SmsSendRequest?>(null) }
     var sentSmsPartCount by remember { mutableIntStateOf(0) }
 
@@ -416,11 +435,18 @@ fun MapScreen(
     }
 
     LaunchedEffect(tMapView, dangerZones) {
+        if (!FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) return@LaunchedEffect
         val view = tMapView ?: return@LaunchedEffect
+        val currentIds = dangerZones.mapTo(mutableSetOf()) { it.mapOverlayId() }
+        visibleDangerZoneIds
+            .filterNot(currentIds::contains)
+            .forEach { clearDangerZone(view, it) }
         dangerZones.forEach { showDangerZone(view, it) }
+        visibleDangerZoneIds = currentIds
     }
 
     LaunchedEffect(dangerZones, activeRoutePoints, isNavigationMode) {
+        if (!FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) return@LaunchedEffect
         if (!isNavigationMode || activeRoutePoints.isEmpty()) return@LaunchedEffect
         val route = activeRoutePoints.map(TMapPoint::toRouteCoordinate)
         if (dangerZones.any { RouteRerouteHelper.routeIntersectsDangerZone(route, it) }) {
@@ -434,7 +460,8 @@ fun MapScreen(
             context = context,
             guardianPhoneNumber = savedGuardianPhoneNumber,
             latitude = uiState.currentLatitude,
-            longitude = uiState.currentLongitude
+            longitude = uiState.currentLongitude,
+            situationSummary = latestEmergencyResult?.summary
         )
         activeSmsRequest = sendRequest
         sentSmsPartCount = 0
@@ -535,6 +562,86 @@ fun MapScreen(
                 }
             }
         }
+    val startSosSituationCheck: () -> Unit = {
+        latestEmergencyResult = null
+        sosSituationMessage = ""
+        sosChatMessages = listOf(
+            EmergencyChatTurn(
+                role = "assistant",
+                content = "지금 어떤 상황인가요? 짧게 입력해 주세요."
+            )
+        )
+        isSosSituationDialogVisible = true
+    }
+    fun currentEmergencyInput(userMessage: String? = null): EmergencySituationInput {
+        return EmergencySituationInput(
+            trigger = "SOS_BUTTON",
+            userMessage = userMessage,
+            latitude = uiState.currentLatitude,
+            longitude = uiState.currentLongitude,
+            accuracyMeters = uiState.currentLocationAccuracyMeters,
+            isNavigationActive = uiState.isNavigationActive,
+            destinationName = uiState.selectedDestination?.name,
+            remainingRouteDistanceMeters = uiState.remainingRouteDistanceMeters,
+            routeDeviationCount = consecutiveRouteDeviationCount,
+            hasVerifiedGuardian = isSavedGuardianPhoneNumberVerified
+        )
+    }
+    val finishSosAfterAnalysis: () -> Unit = {
+        isSosAnalysisInProgress = false
+        isSosSituationDialogVisible = false
+        vibrate(context, longArrayOf(0, 120, 80, 120))
+        sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
+    }
+    val sendSosChatMessage: (String) -> Unit = chat@ { rawMessage ->
+        val userMessage = rawMessage.trim()
+        if (userMessage.isBlank() || isSosAnalysisInProgress) {
+            return@chat
+        }
+        val updatedMessages = sosChatMessages + EmergencyChatTurn(
+            role = "user",
+            content = userMessage
+        )
+        sosChatMessages = updatedMessages
+        sosSituationMessage = ""
+
+        coroutineScope.launch {
+            isSosAnalysisInProgress = true
+            runCatching {
+                emergencyChatClient.chat(
+                    messages = updatedMessages,
+                    input = currentEmergencyInput(userMessage)
+                )
+            }.onSuccess { response ->
+                sosChatMessages = sosChatMessages + EmergencyChatTurn(
+                    role = "assistant",
+                    content = response.assistantMessage
+                )
+                if (response.isFinal && response.result != null) {
+                    latestEmergencyResult = response.result
+                    finishSosAfterAnalysis()
+                } else {
+                    isSosAnalysisInProgress = false
+                }
+            }.onFailure { error ->
+                Log.e(TMAP_LOG_TAG, "Failed to continue Gemini emergency chat.", error)
+                val combinedUserMessages = updatedMessages
+                    .filter { it.role == "user" }
+                    .joinToString(" / ") { it.content }
+                latestEmergencyResult = emergencyAnalyzer.analyze(
+                    currentEmergencyInput(combinedUserMessages)
+                )
+                val reason = error.message
+                    ?.takeIf(String::isNotBlank)
+                    ?.take(160)
+                    ?.let { "\n원인: $it" }
+                    .orEmpty()
+                sosNoticeMessage = "Gemini 대화 연결에 실패했습니다. 서버 주소, 서버 실행 상태, API 키를 확인하세요.$reason\n기본 분석으로 SOS를 진행합니다."
+                finishSosAfterAnalysis()
+            }
+        }
+    }
+
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -551,7 +658,7 @@ fun MapScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
+            startSosSituationCheck()
         } else {
             sosNoticeMessage = "보호자에게 SOS 문자를 보내려면 문자 권한이 필요합니다"
         }
@@ -692,8 +799,7 @@ fun MapScreen(
         ) {
             smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
         } else {
-            vibrate(context, longArrayOf(0, 120, 80, 120))
-            sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
+            startSosSituationCheck()
         }
     }
 
@@ -851,6 +957,7 @@ fun MapScreen(
         uiState.currentLongitude,
         uiState.selectedDestination
     ) {
+        if (!FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) return@LaunchedEffect
         if (
             dangerZone == null ||
             dangerZoneEventVersion <= lastHandledDangerZoneEventVersion ||
@@ -865,11 +972,6 @@ fun MapScreen(
         val destination = uiState.selectedDestination ?: return@LaunchedEffect
         lastHandledDangerZoneEventVersion = dangerZoneEventVersion
         showDangerZone(view, dangerZone)
-
-        if (selectedRouteMode != RouteMode.GENERAL) {
-            hazardNoticeMessage = "위험지점을 표시했습니다. CCTV·가로등 경로의 자동 우회는 아직 적용되지 않습니다."
-            return@LaunchedEffect
-        }
 
         val routeCoordinates = activeRoutePoints.map(TMapPoint::toRouteCoordinate)
         val minimumDistanceMeters = RouteRerouteHelper.minimumDistanceMeters(
@@ -907,6 +1009,10 @@ fun MapScreen(
                     routePoints = result.routePoints,
                     onRouteSearchCompleted = { distanceMeters ->
                         isRouteRecalculationInProgress = false
+                        activeCctvWaypointCount = 0
+                        activeCctvRouteAnalysis = null
+                        clearRouteCctvMarkers(view)
+                        clearRouteStreetlightMarkers(view)
                         hazardNoticeMessage = "위험지점 감지로 우회 경로를 안내합니다."
                         onHazardRerouteCompleted(distanceMeters)
                         speak(textToSpeech, "위험지점을 감지하여 우회 경로로 안내합니다.")
@@ -1222,43 +1328,29 @@ fun MapScreen(
                                 modifier = Modifier.padding(12.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text(
-                                    text = "📡 AI 서버: ${signalPollingUiState.statusMessage}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                                Text(
-                                    text = "위험구역 ${signalPollingUiState.dangerZones.size}개",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                signalPollingUiState.latestDangerZone?.let { zone ->
+                                if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
                                     Text(
-                                        text = "${zone.message} (반경 ${zone.radiusMeters.toInt()}m)",
+                                        text = "📡 AI 서버: ${signalPollingUiState.statusMessage}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        text = "위험구역 ${signalPollingUiState.dangerZones.size}개",
                                         style = MaterialTheme.typography.bodySmall
                                     )
-                                }
-                                Button(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    enabled = uiState.currentLatitude != null &&
-                                        uiState.currentLongitude != null,
-                                    onClick = {
-                                        onUavEscortRequested(
-                                            uiState.currentLatitude!!,
-                                            uiState.currentLongitude!!
+                                    signalPollingUiState.latestDangerZone?.let { zone ->
+                                        Text(
+                                            text = "${zone.message} (반경 ${zone.radiusMeters.toInt()}m)",
+                                            style = MaterialTheme.typography.bodySmall
                                         )
                                     }
-                                ) {
-                                    Text("UAV 안심귀가 요청")
-                                }
-                                signalPollingUiState.escortStatusMessage?.let {
-                                    Text(it, style = MaterialTheme.typography.bodySmall)
-                                }
-                                hazardNoticeMessage?.let { notice ->
-                                    Text(
-                                        text = notice,
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodyMedium
-                                    )
+                                    hazardNoticeMessage?.let { notice ->
+                                        Text(
+                                            text = notice,
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
                                 }
                                 Text(
                                     text = uiState.routeSummary,
@@ -1320,11 +1412,13 @@ fun MapScreen(
                         modifier = Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(
-                            text = "📡 AI 서버: ${signalPollingUiState.statusMessage}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
+                            Text(
+                                text = "📡 AI 서버: ${signalPollingUiState.statusMessage}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                         Text(text = uiState.gpsSignalLabel)
                         Text(text = if (isFollowingCurrentLocation) "자동 추적: 켜짐" else "자동 추적: 꺼짐")
                         if (uiState.selectedDestination != null) {
@@ -1385,6 +1479,21 @@ fun MapScreen(
                     onClick = {
                         activeCctvWaypointCount = 0
                         activeCctvRouteAnalysis = null
+                        visibleDangerZoneIds.forEach { dangerZoneId ->
+                            tMapView?.let { clearDangerZone(it, dangerZoneId) }
+                        }
+                        visibleDangerZoneIds = emptySet()
+                        hazardNoticeMessage = null
+                        lastHandledDangerZoneEventVersion = dangerZoneEventVersion
+                        coroutineScope.launch {
+                            runCatching {
+                                FastApiDangerEventSource(
+                                    serverPreferences.getServerAddress()
+                                ).clearDangerZones()
+                            }.onFailure { error ->
+                                Log.w(TMAP_LOG_TAG, "Failed to clear danger zones.", error)
+                            }
+                        }
                         onRouteSearchStarted()
                         routeSearchRequestId += 1
                     }
@@ -1401,6 +1510,77 @@ fun MapScreen(
                 }
             }
         }
+    }
+
+    if (isSosSituationDialogVisible) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isSosAnalysisInProgress) isSosSituationDialogVisible = false
+            },
+            title = { Text("긴급상황 대화") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    sosChatMessages.forEach { message ->
+                        val prefix = if (message.role == "user") "나" else "앱"
+                        Text("$prefix: ${message.content}")
+                    }
+                    OutlinedTextField(
+                        value = sosSituationMessage,
+                        onValueChange = { sosSituationMessage = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isSosAnalysisInProgress,
+                        label = { Text("답변 입력") },
+                        minLines = 2
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = !isSosAnalysisInProgress,
+                            onClick = { sendSosChatMessage("누군가 따라와요") }
+                        ) {
+                            Text("따라와요")
+                        }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = !isSosAnalysisInProgress,
+                            onClick = { sendSosChatMessage("말하기 어려워요") }
+                        ) {
+                            Text("말하기 어려움")
+                        }
+                    }
+                    if (isSosAnalysisInProgress) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !isSosAnalysisInProgress && sosSituationMessage.isNotBlank(),
+                    onClick = { sendSosChatMessage(sosSituationMessage) }
+                ) {
+                    Text("보내기")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isSosAnalysisInProgress,
+                    onClick = {
+                        isSosSituationDialogVisible = false
+                        openEmergencyDialer(context)
+                    }
+                ) {
+                    Text("112 전화")
+                }
+            }
+        )
     }
 
     sosCountdownSeconds?.let { seconds ->
@@ -1494,6 +1674,7 @@ fun MapScreen(
             }
         )
     }
+
 }
 
 @Composable
@@ -1524,6 +1705,58 @@ private fun SosFloatingActionButton(
     ) {
         Text("SOS\n3초")
     }
+}
+
+private fun sendGuardianSms(
+    context: Context,
+    guardianPhoneNumber: String,
+    latitude: Double?,
+    longitude: Double?,
+    situationSummary: String?
+): SmsSendRequest? {
+    val locationMessage = if (latitude != null && longitude != null) {
+        "현재 위치: https://maps.google.com/?q=$latitude,$longitude"
+    } else {
+        "현재 위치를 확인할 수 없습니다"
+    }
+    val situationMessage = situationSummary
+        ?.trim()
+        ?.takeIf(String::isNotBlank)
+        ?.let { " 상황: $it" }
+        .orEmpty()
+    val message = "[안전귀가 SOS] 도움이 필요합니다.$situationMessage $locationMessage"
+    return runCatching {
+        val normalizedPhoneNumber = guardianPhoneNumber.filterIndexed { index, character ->
+            character.isDigit() || (character == '+' && index == 0)
+        }
+        require(normalizedPhoneNumber.isNotBlank()) { "Guardian phone number is blank." }
+        val smsManager = context.getSystemService(SmsManager::class.java)
+            ?: error("SMS service is unavailable.")
+        val messageParts = smsManager.divideMessage(message)
+        val requestId = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
+        val sentIntents = ArrayList<PendingIntent>(messageParts.size)
+        messageParts.indices.forEach { partIndex ->
+            val sentIntent = Intent(SOS_SMS_SENT_ACTION)
+                .setPackage(context.packageName)
+                .putExtra(SOS_SMS_REQUEST_ID_KEY, requestId)
+            sentIntents += PendingIntent.getBroadcast(
+                context,
+                requestId + partIndex,
+                sentIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+        smsManager.sendMultipartTextMessage(
+            normalizedPhoneNumber,
+            null,
+            messageParts,
+            sentIntents,
+            null
+        )
+        SmsSendRequest(requestId = requestId, partCount = messageParts.size)
+    }.onFailure { error ->
+        Log.e(TMAP_LOG_TAG, "Failed to send the guardian SMS.", error)
+    }.getOrNull()
 }
 
 private fun sendGuardianSms(
@@ -2106,7 +2339,7 @@ private fun createDestinationIcon(): Bitmap {
 
 private fun showDangerZone(view: TMapView, dangerZone: DangerZone) {
     runCatching {
-        val safeId = dangerZone.id.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val safeId = dangerZone.mapOverlayId()
         val markerId = "$DANGER_ZONE_MARKER_PREFIX$safeId"
         val circleId = "$DANGER_ZONE_CIRCLE_PREFIX$safeId"
         val areaColor = if (dangerZone.type == DangerZoneType.LAMP_FAULT) {
@@ -2144,6 +2377,19 @@ private fun showDangerZone(view: TMapView, dangerZone: DangerZone) {
         )
     }.onFailure { error ->
         Log.w(TMAP_LOG_TAG, "Failed to show danger zone ${dangerZone.id}.", error)
+    }
+}
+
+private fun DangerZone.mapOverlayId(): String {
+    return id.replace(Regex("[^A-Za-z0-9_-]"), "_")
+}
+
+private fun clearDangerZone(view: TMapView, safeId: String) {
+    runCatching {
+        view.removeTMapCircle("$DANGER_ZONE_CIRCLE_PREFIX$safeId")
+        view.removeTMapMarkerItem("$DANGER_ZONE_MARKER_PREFIX$safeId")
+    }.onFailure { error ->
+        Log.w(TMAP_LOG_TAG, "Failed to clear danger zone $safeId.", error)
     }
 }
 

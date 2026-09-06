@@ -34,10 +34,21 @@ fun parseDangerZoneList(responseBody: String): List<DangerZone> {
 
 fun parseDangerEventMessage(message: String): DangerZone? {
     val root = JSONObject(message)
+    return parseDangerZoneEvent(root)
+}
+
+fun parseEventMessage(message: String): DangerEventUpdate? {
+    val root = JSONObject(message)
+    return when (root.optString("type")) {
+        "danger_zones_cleared" -> DangerEventUpdate.DangerZonesCleared
+        else -> parseDangerZoneEvent(root)?.let(DangerEventUpdate::DangerZoneCreated)
+    }
+}
+
+private fun parseDangerZoneEvent(root: JSONObject): DangerZone? {
     return when (root.optString("type")) {
         "danger_zone_created" -> root.optJSONObject("payload")?.let(::parseDangerZone)
-        "LAMP_FAULT", "DANGER_EVENT", "CCTV_BLIND_SPOT", "PATROL_WARNING" ->
-            parseDangerZone(root)
+        "LAMP_FAULT", "DANGER_EVENT", "CCTV_BLIND_SPOT", "PATROL_WARNING" -> parseDangerZone(root)
         else -> null
     }
 }

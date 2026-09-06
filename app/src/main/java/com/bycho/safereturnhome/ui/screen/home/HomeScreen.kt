@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.bycho.safereturnhome.FeatureFlags
 import com.bycho.safereturnhome.ui.state.HomeUiState
 import com.bycho.safereturnhome.ui.state.SignalPollingUiState
 import com.bycho.safereturnhome.ui.viewmodel.HomeViewModel
@@ -40,8 +41,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-private const val SHOW_SERVER_CONTROLS = true
 
 @Composable
 fun HomeRoute(
@@ -191,7 +190,7 @@ fun HomeScreen(
 
             FeatureSummary()
 
-            if (SHOW_SERVER_CONTROLS) {
+            if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier.padding(16.dp),
@@ -211,7 +210,6 @@ fun HomeScreen(
                         signalPollingUiState.lastEventReceivedAtMillis?.let { receivedAt ->
                             Text(text = "마지막 이벤트: ${formatEventTime(receivedAt)}")
                         }
-                        signalPollingUiState.escortStatusMessage?.let { Text(it) }
                         signalPollingUiState.latestStatus?.let {
                             Text(text = "현재 상태: $it")
                         }
@@ -227,7 +225,7 @@ fun HomeScreen(
             ) {
                 Text("보호자 설정")
             }
-            if (SHOW_SERVER_CONTROLS) {
+            if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
                 OutlinedButton(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = onServerSettingsClick
