@@ -144,7 +144,6 @@ dependencies {
     implementation(libs.flatbuffers.java)
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.auth)
-    implementation(libs.mlkit.genai.prompt)
     implementation(libs.okhttp)
     implementation(files("libs/vsm-tmap-sdk-v2-android-2.0.0.aar"))
 

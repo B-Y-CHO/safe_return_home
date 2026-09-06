@@ -12,7 +12,6 @@ material = "1.13.0"
 navigationCompose = "2.9.3"
 flatbuffersJava = "24.3.25"
 firebaseBom = "34.15.0"
-mlkitGenaiPrompt = "1.0.0-beta2"
 googleServices = "4.5.0"
 json = "20260522"
 okhttp = "4.12.0"
@@ -40,7 +39,6 @@ material = { group = "com.google.android.material", name = "material", version.r
 flatbuffers-java = { group = "com.google.flatbuffers", name = "flatbuffers-java", version.ref = "flatbuffersJava" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
-mlkit-genai-prompt = { group = "com.google.mlkit", name = "genai-prompt", version.ref = "mlkitGenaiPrompt" }
 json = { group = "org.json", name = "json", version.ref = "json" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 

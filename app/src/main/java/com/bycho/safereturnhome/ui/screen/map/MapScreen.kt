@@ -1,4 +1,4 @@
-package com.bycho.safereturnhome.ui.screen.map
+﻿package com.bycho.safereturnhome.ui.screen.map
 
 import android.Manifest
 import android.app.Activity
@@ -72,7 +72,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -90,11 +89,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bycho.safereturnhome.FeatureFlags
 import com.bycho.safereturnhome.BuildConfig
 import com.bycho.safereturnhome.R
-import com.bycho.safereturnhome.ai.EmergencyChatTurn
-import com.bycho.safereturnhome.ai.GeminiCloudEmergencyChatClient
-import com.bycho.safereturnhome.ai.EmergencySituationInput
-import com.bycho.safereturnhome.ai.EmergencySituationResult
-import com.bycho.safereturnhome.ai.HybridEmergencySituationAnalyzer
 import com.bycho.safereturnhome.data.CctvCoordinate
 import com.bycho.safereturnhome.data.CctvRepository
 import com.bycho.safereturnhome.data.CctvSafeRoutePlan
@@ -375,13 +369,8 @@ fun MapScreen(
 ) {
     val context = LocalContext.current
     val rootView = LocalView.current
-    val coroutineScope = rememberCoroutineScope()
-    val emergencyAnalyzer = remember { HybridEmergencySituationAnalyzer() }
     val guardianPreferences = remember(context) { GuardianPreferences(context) }
     val serverPreferences = remember(context) { ServerPreferences(context) }
-    val emergencyChatClient = remember(context) {
-        GeminiCloudEmergencyChatClient(serverPreferences.getServerAddress())
-    }
     val recentDestinationPreferences = remember(context) { RecentDestinationPreferences(context) }
     var recenterRequestId by remember { mutableIntStateOf(0) }
     var destinationFocusRequestId by remember { mutableIntStateOf(0) }
@@ -422,11 +411,6 @@ fun MapScreen(
     }
     var sosCountdownSeconds by remember { mutableStateOf<Int?>(null) }
     var sosNoticeMessage by remember { mutableStateOf<String?>(null) }
-    var latestEmergencyResult by remember { mutableStateOf<EmergencySituationResult?>(null) }
-    var isSosSituationDialogVisible by remember { mutableStateOf(false) }
-    var sosSituationMessage by remember { mutableStateOf("") }
-    var sosChatMessages by remember { mutableStateOf<List<EmergencyChatTurn>>(emptyList()) }
-    var isSosAnalysisInProgress by remember { mutableStateOf(false) }
     var activeSmsRequest by remember { mutableStateOf<SmsSendRequest?>(null) }
     var sentSmsPartCount by remember { mutableIntStateOf(0) }
 
@@ -451,7 +435,7 @@ fun MapScreen(
         val route = activeRoutePoints.map(TMapPoint::toRouteCoordinate)
         if (dangerZones.any { RouteRerouteHelper.routeIntersectsDangerZone(route, it) }) {
             hazardNoticeMessage =
-                "현재 경로에 위험구역이 포함되어 있습니다. 안전경로 재탐색이 필요합니다."
+                "?꾩옱 寃쎈줈???꾪뿕援ъ뿭???ы븿?섏뼱 ?덉뒿?덈떎. ?덉쟾寃쎈줈 ?ы깘?됱씠 ?꾩슂?⑸땲??"
         }
     }
 
@@ -460,15 +444,14 @@ fun MapScreen(
             context = context,
             guardianPhoneNumber = savedGuardianPhoneNumber,
             latitude = uiState.currentLatitude,
-            longitude = uiState.currentLongitude,
-            situationSummary = latestEmergencyResult?.summary
+            longitude = uiState.currentLongitude
         )
         activeSmsRequest = sendRequest
         sentSmsPartCount = 0
         sosNoticeMessage = if (sendRequest != null) {
-            "SOS 문자 전송을 요청했습니다"
+            "SOS 臾몄옄 ?꾩넚???붿껌?덉뒿?덈떎"
         } else {
-            "SOS 문자 전송 요청에 실패했습니다"
+            "SOS 臾몄옄 ?꾩넚 ?붿껌???ㅽ뙣?덉뒿?덈떎"
         }
     }
     val onTrackedLocationLoaded: (Double, Double, Float, Float) -> Unit =
@@ -495,7 +478,7 @@ fun MapScreen(
                     consecutiveRouteDeviationCount = 0
                     onDestinationArrived()
                     isArrivalNoticeVisible = true
-                    speak(textToSpeech, "목적지에 도착했습니다.")
+                    speak(textToSpeech, "紐⑹쟻吏???꾩갑?덉뒿?덈떎.")
                     vibrateArrival(context)
                 } else if (!isRouteRecalculationInProgress) {
                     consecutiveRouteDeviationCount =
@@ -508,7 +491,7 @@ fun MapScreen(
                         consecutiveRouteDeviationCount = 0
                         isRouteRecalculationInProgress = true
                         onRouteRecalculationStarted()
-                        speak(textToSpeech, "경로를 벗어났습니다. 경로를 다시 검색합니다.")
+                        speak(textToSpeech, "寃쎈줈瑜?踰쀬뼱?ъ뒿?덈떎. 寃쎈줈瑜??ㅼ떆 寃?됲빀?덈떎.")
                         vibrateRouteRecalculation(context)
                         routeSearchRequestId += 1
                     }
@@ -555,91 +538,16 @@ fun MapScreen(
                 ) {
                     speak(
                         textToSpeech,
-                        "${distanceToGuidanceStep.toInt()}미터 앞에서 ${guidanceStep.instruction}"
+                        "${distanceToGuidanceStep.toInt()}誘명꽣 ?욎뿉??${guidanceStep.instruction}"
                     )
                     announcedGuidanceStepIndex = guidanceStepIndex
                     announcedGuidanceThresholdMeters = announcementThresholdMeters
                 }
             }
         }
-    val startSosSituationCheck: () -> Unit = {
-        latestEmergencyResult = null
-        sosSituationMessage = ""
-        sosChatMessages = listOf(
-            EmergencyChatTurn(
-                role = "assistant",
-                content = "지금 어떤 상황인가요? 짧게 입력해 주세요."
-            )
-        )
-        isSosSituationDialogVisible = true
-    }
-    fun currentEmergencyInput(userMessage: String? = null): EmergencySituationInput {
-        return EmergencySituationInput(
-            trigger = "SOS_BUTTON",
-            userMessage = userMessage,
-            latitude = uiState.currentLatitude,
-            longitude = uiState.currentLongitude,
-            accuracyMeters = uiState.currentLocationAccuracyMeters,
-            isNavigationActive = uiState.isNavigationActive,
-            destinationName = uiState.selectedDestination?.name,
-            remainingRouteDistanceMeters = uiState.remainingRouteDistanceMeters,
-            routeDeviationCount = consecutiveRouteDeviationCount,
-            hasVerifiedGuardian = isSavedGuardianPhoneNumberVerified
-        )
-    }
-    val finishSosAfterAnalysis: () -> Unit = {
-        isSosAnalysisInProgress = false
-        isSosSituationDialogVisible = false
+    val startSosCountdown: () -> Unit = {
         vibrate(context, longArrayOf(0, 120, 80, 120))
         sosCountdownSeconds = SOS_COUNTDOWN_SECONDS
-    }
-    val sendSosChatMessage: (String) -> Unit = chat@ { rawMessage ->
-        val userMessage = rawMessage.trim()
-        if (userMessage.isBlank() || isSosAnalysisInProgress) {
-            return@chat
-        }
-        val updatedMessages = sosChatMessages + EmergencyChatTurn(
-            role = "user",
-            content = userMessage
-        )
-        sosChatMessages = updatedMessages
-        sosSituationMessage = ""
-
-        coroutineScope.launch {
-            isSosAnalysisInProgress = true
-            runCatching {
-                emergencyChatClient.chat(
-                    messages = updatedMessages,
-                    input = currentEmergencyInput(userMessage)
-                )
-            }.onSuccess { response ->
-                sosChatMessages = sosChatMessages + EmergencyChatTurn(
-                    role = "assistant",
-                    content = response.assistantMessage
-                )
-                if (response.isFinal && response.result != null) {
-                    latestEmergencyResult = response.result
-                    finishSosAfterAnalysis()
-                } else {
-                    isSosAnalysisInProgress = false
-                }
-            }.onFailure { error ->
-                Log.e(TMAP_LOG_TAG, "Failed to continue Gemini emergency chat.", error)
-                val combinedUserMessages = updatedMessages
-                    .filter { it.role == "user" }
-                    .joinToString(" / ") { it.content }
-                latestEmergencyResult = emergencyAnalyzer.analyze(
-                    currentEmergencyInput(combinedUserMessages)
-                )
-                val reason = error.message
-                    ?.takeIf(String::isNotBlank)
-                    ?.take(160)
-                    ?.let { "\n원인: $it" }
-                    .orEmpty()
-                sosNoticeMessage = "Gemini 대화 연결에 실패했습니다. 서버 주소, 서버 실행 상태, API 키를 확인하세요.$reason\n기본 분석으로 SOS를 진행합니다."
-                finishSosAfterAnalysis()
-            }
-        }
     }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
@@ -658,9 +566,9 @@ fun MapScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            startSosSituationCheck()
+            startSosCountdown()
         } else {
-            sosNoticeMessage = "보호자에게 SOS 문자를 보내려면 문자 권한이 필요합니다"
+            sosNoticeMessage = "蹂댄샇?먯뿉寃?SOS 臾몄옄瑜?蹂대궡?ㅻ㈃ 臾몄옄 沅뚰븳???꾩슂?⑸땲??
         }
     }
 
@@ -726,7 +634,7 @@ fun MapScreen(
                     sentSmsPartCount += 1
                     if (sentSmsPartCount >= request.partCount) {
                         activeSmsRequest = null
-                        sosNoticeMessage = "보호자에게 SOS 문자를 전송했습니다"
+                        sosNoticeMessage = "蹂댄샇?먯뿉寃?SOS 臾몄옄瑜??꾩넚?덉뒿?덈떎"
                     }
                 } else {
                     activeSmsRequest = null
@@ -788,9 +696,9 @@ fun MapScreen(
 
     val onSosActivated: () -> Unit = {
         if (guardianPhoneNumberError(savedGuardianPhoneNumber) != null) {
-            sosNoticeMessage = "보호자 설정에서 올바른 휴대폰 번호 인증을 먼저 완료해주세요"
+            sosNoticeMessage = "蹂댄샇???ㅼ젙?먯꽌 ?щ컮瑜??대???踰덊샇 ?몄쬆??癒쇱? ?꾨즺?댁＜?몄슂"
         } else if (!isSavedGuardianPhoneNumberVerified) {
-            sosNoticeMessage = "보호자 설정에서 휴대폰 번호 인증을 먼저 완료해주세요"
+            sosNoticeMessage = "蹂댄샇???ㅼ젙?먯꽌 ?대???踰덊샇 ?몄쬆??癒쇱? ?꾨즺?댁＜?몄슂"
         } else if (
             ContextCompat.checkSelfPermission(
                 context,
@@ -799,7 +707,7 @@ fun MapScreen(
         ) {
             smsPermissionLauncher.launch(Manifest.permission.SEND_SMS)
         } else {
-            startSosSituationCheck()
+            startSosCountdown()
         }
     }
 
@@ -825,11 +733,11 @@ fun MapScreen(
             destination = destination,
             general = RouteOptionPreview(
                 isLoading = true,
-                statusMessage = "일반 경로 거리를 계산하는 중입니다."
+                statusMessage = "?쇰컲 寃쎈줈 嫄곕━瑜?怨꾩궛?섎뒗 以묒엯?덈떎."
             ),
             cctvSafe = RouteOptionPreview(
                 isLoading = true,
-                statusMessage = "CCTV·가로등 경로 거리를 계산하는 중입니다."
+                statusMessage = "CCTV쨌媛濡쒕벑 寃쎈줈 嫄곕━瑜?怨꾩궛?섎뒗 以묒엯?덈떎."
             )
         )
 
@@ -845,7 +753,7 @@ fun MapScreen(
                     general = RouteOptionPreview(
                         distanceMeters = generalDistanceMeters,
                         errorMessage = if (generalDistanceMeters == null) {
-                            "일반 경로 거리를 계산하지 못했습니다."
+                            "?쇰컲 寃쎈줈 嫄곕━瑜?怨꾩궛?섏? 紐삵뻽?듬땲??"
                         } else {
                             null
                         }
@@ -877,7 +785,7 @@ fun MapScreen(
                             cctvSafe = RouteOptionPreview(
                                 distanceMeters = previewResult.distanceMeters,
                                 errorMessage = if (previewResult.distanceMeters == null) {
-                                    "유효 안전경로 없음"
+                                    "?좏슚 ?덉쟾寃쎈줈 ?놁쓬"
                                 } else {
                                     null
                                 },
@@ -983,15 +891,15 @@ fun MapScreen(
             "Danger zone ${dangerZone.id} distance from active route: ${minimumDistanceMeters.toInt()}m"
         )
         if (!RouteRerouteHelper.routeIntersectsDangerZone(routeCoordinates, dangerZone)) {
-            hazardNoticeMessage = "위험지점이 표시되었습니다. (현재 경로와 ${minimumDistanceMeters.toInt()}m 떨어져 있어 경로를 유지합니다)"
+            hazardNoticeMessage = "?꾪뿕吏?먯씠 ?쒖떆?섏뿀?듬땲?? (?꾩옱 寃쎈줈? ${minimumDistanceMeters.toInt()}m ?⑥뼱???덉뼱 寃쎈줈瑜??좎??⑸땲??"
             return@LaunchedEffect
         }
 
         hazardRerouteRequestId += 1
         val requestId = hazardRerouteRequestId
         isRouteRecalculationInProgress = true
-        hazardNoticeMessage = "현재 경로에 위험구역이 포함되어 있습니다. 안전경로 재탐색이 필요합니다. 재탐색 중입니다."
-        onHazardRerouteStarted("현재 경로에 위험구역이 포함되어 있습니다. 안전경로 재탐색이 필요합니다.")
+        hazardNoticeMessage = "?꾩옱 寃쎈줈???꾪뿕援ъ뿭???ы븿?섏뼱 ?덉뒿?덈떎. ?덉쟾寃쎈줈 ?ы깘?됱씠 ?꾩슂?⑸땲?? ?ы깘??以묒엯?덈떎."
+        onHazardRerouteStarted("?꾩옱 寃쎈줈???꾪뿕援ъ뿭???ы븿?섏뼱 ?덉뒿?덈떎. ?덉쟾寃쎈줈 ?ы깘?됱씠 ?꾩슂?⑸땲??")
         findBestHazardAvoidingRoute(
             view = view,
             startPoint = TMapPoint(currentLatitude, currentLongitude),
@@ -1000,7 +908,7 @@ fun MapScreen(
             dangerZone = dangerZone,
             isRequestActive = { requestId == hazardRerouteRequestId },
             onProgress = { current, total ->
-                onHazardRerouteStarted("위험지점 우회 후보를 확인하는 중입니다. ($current/$total)")
+                onHazardRerouteStarted("?꾪뿕吏???고쉶 ?꾨낫瑜??뺤씤?섎뒗 以묒엯?덈떎. ($current/$total)")
             },
             onCompleted = { result ->
                 if (requestId != hazardRerouteRequestId) return@findBestHazardAvoidingRoute
@@ -1013,14 +921,14 @@ fun MapScreen(
                         activeCctvRouteAnalysis = null
                         clearRouteCctvMarkers(view)
                         clearRouteStreetlightMarkers(view)
-                        hazardNoticeMessage = "위험지점 감지로 우회 경로를 안내합니다."
+                        hazardNoticeMessage = "?꾪뿕吏??媛먯?濡??고쉶 寃쎈줈瑜??덈궡?⑸땲??"
                         onHazardRerouteCompleted(distanceMeters)
-                        speak(textToSpeech, "위험지점을 감지하여 우회 경로로 안내합니다.")
+                        speak(textToSpeech, "?꾪뿕吏?먯쓣 媛먯??섏뿬 ?고쉶 寃쎈줈濡??덈궡?⑸땲??")
                         vibrateRouteRecalculation(context)
                     },
                     onRouteSearchFailed = { reason ->
                         isRouteRecalculationInProgress = false
-                        hazardNoticeMessage = "우회 경로를 지도에 표시하지 못했습니다. 기존 경로를 확인해 주세요."
+                        hazardNoticeMessage = "?고쉶 寃쎈줈瑜?吏?꾩뿉 ?쒖떆?섏? 紐삵뻽?듬땲?? 湲곗〈 寃쎈줈瑜??뺤씤??二쇱꽭??"
                         onHazardRerouteFailed(reason)
                     },
                     onRoutePointsChanged = { activeRoutePoints = it },
@@ -1035,8 +943,8 @@ fun MapScreen(
             onUnavailable = {
                 if (requestId != hazardRerouteRequestId) return@findBestHazardAvoidingRoute
                 isRouteRecalculationInProgress = false
-                val warning = "위험지점을 피하는 우회 경로를 찾지 못했습니다"
-                hazardNoticeMessage = "$warning. 기존 경로를 유지합니다."
+                val warning = "?꾪뿕吏?먯쓣 ?쇳븯???고쉶 寃쎈줈瑜?李얠? 紐삵뻽?듬땲??
+                hazardNoticeMessage = "$warning. 湲곗〈 寃쎈줈瑜??좎??⑸땲??"
                 onHazardRerouteFailed(hazardNoticeMessage!!)
                 Log.w(TMAP_LOG_TAG, warning)
             }
@@ -1046,13 +954,13 @@ fun MapScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (isNavigationMode) "경로 안내" else "경로 설정") },
+                title = { Text(if (isNavigationMode) "寃쎈줈 ?덈궡" else "寃쎈줈 ?ㅼ젙") },
                 navigationIcon = {
                     if (!isNavigationMode) {
                         IconButton(onClick = onBackClick) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_arrow_back),
-                                contentDescription = "뒤로 가기"
+                                contentDescription = "?ㅻ줈 媛湲?
                             )
                         }
                     }
@@ -1076,8 +984,8 @@ fun MapScreen(
                     modifier = Modifier.fillMaxWidth(),
                     value = uiState.destinationQuery,
                     onValueChange = onDestinationQueryChanged,
-                    label = { Text("목적지 검색") },
-                    placeholder = { Text("구미시 장소명 또는 주소") },
+                    label = { Text("紐⑹쟻吏 寃??) },
+                    placeholder = { Text("援щ????μ냼紐??먮뒗 二쇱냼") },
                     singleLine = true
                 )
                 Button(
@@ -1095,7 +1003,7 @@ fun MapScreen(
                         )
                     }
                 ) {
-                    Text(if (uiState.isDestinationSearchInProgress) "검색 중..." else "검색")
+                    Text(if (uiState.isDestinationSearchInProgress) "寃??以?.." else "寃??)
                 }
                 uiState.destinationSearchMessage?.let { message ->
                     Text(text = message)
@@ -1195,7 +1103,7 @@ fun MapScreen(
                         onRouteSearchCompleted(distanceMeters)
                         isNavigationMode = true
                         if (isFirstRouteSearch) {
-                            speak(textToSpeech, "경로 안내를 시작합니다.")
+                            speak(textToSpeech, "寃쎈줈 ?덈궡瑜??쒖옉?⑸땲??")
                             vibrateNavigationStarted(context)
                         }
                     },
@@ -1279,12 +1187,12 @@ fun MapScreen(
                                 verticalArrangement = Arrangement.spacedBy(2.dp)
                             ) {
                                 Text(
-                                    text = guidanceStep?.maneuver?.ifBlank { "다음 안내" }
-                                        ?: "경로 안내 준비 중",
+                                    text = guidanceStep?.maneuver?.ifBlank { "?ㅼ쓬 ?덈궡" }
+                                        ?: "寃쎈줈 ?덈궡 以鍮?以?,
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 distanceToGuidanceStep?.let { distanceMeters ->
-                                    Text(text = "${distanceMeters}m 앞")
+                                    Text(text = "${distanceMeters}m ??)
                                 }
                             }
                         }
@@ -1320,7 +1228,7 @@ fun MapScreen(
                                     uiState.currentLongitude != null,
                                 onClick = recenterToCurrentLocation
                             ) {
-                                Text("내 위치")
+                                Text("???꾩튂")
                             }
                         }
                         Card(modifier = Modifier.fillMaxWidth()) {
@@ -1330,17 +1238,17 @@ fun MapScreen(
                             ) {
                                 if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
                                     Text(
-                                        text = "📡 AI 서버: ${signalPollingUiState.statusMessage}",
+                                        text = "?뱻 AI ?쒕쾭: ${signalPollingUiState.statusMessage}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                     Text(
-                                        text = "위험구역 ${signalPollingUiState.dangerZones.size}개",
+                                        text = "?꾪뿕援ъ뿭 ${signalPollingUiState.dangerZones.size}媛?,
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     signalPollingUiState.latestDangerZone?.let { zone ->
                                         Text(
-                                            text = "${zone.message} (반경 ${zone.radiusMeters.toInt()}m)",
+                                            text = "${zone.message} (諛섍꼍 ${zone.radiusMeters.toInt()}m)",
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
@@ -1365,11 +1273,11 @@ fun MapScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(text = "진행률 ${(uiState.routeProgress * 100).toInt()}%")
+                                    Text(text = "吏꾪뻾瑜?${(uiState.routeProgress * 100).toInt()}%")
                                     OutlinedButton(
                                         onClick = { isNavigationEndConfirmationVisible = true }
                                     ) {
-                                        Text("안내 종료")
+                                        Text("?덈궡 醫낅즺")
                                     }
                                 }
                             }
@@ -1384,7 +1292,7 @@ fun MapScreen(
                         enabled = uiState.currentLatitude != null && uiState.currentLongitude != null,
                         onClick = recenterToCurrentLocation
                     ) {
-                        Text("내 위치")
+                        Text("???꾩튂")
                     }
                 }
                 if (!isNavigationMode) {
@@ -1414,13 +1322,13 @@ fun MapScreen(
                     ) {
                         if (FeatureFlags.SHOW_DALSEO_EVENT_FEATURES) {
                             Text(
-                                text = "📡 AI 서버: ${signalPollingUiState.statusMessage}",
+                                text = "?뱻 AI ?쒕쾭: ${signalPollingUiState.statusMessage}",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
                         Text(text = uiState.gpsSignalLabel)
-                        Text(text = if (isFollowingCurrentLocation) "자동 추적: 켜짐" else "자동 추적: 꺼짐")
+                        Text(text = if (isFollowingCurrentLocation) "?먮룞 異붿쟻: 耳쒖쭚" else "?먮룞 異붿쟻: 爰쇱쭚")
                         if (uiState.selectedDestination != null) {
                             Text(text = uiState.destinationLabel)
                         }
@@ -1435,7 +1343,7 @@ fun MapScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "경로 유형",
+                            text = "寃쎈줈 ?좏삎",
                             style = MaterialTheme.typography.titleMedium
                         )
                         Row(
@@ -1444,7 +1352,7 @@ fun MapScreen(
                         ) {
                             RouteModeButton(
                                 modifier = Modifier.weight(1f),
-                                title = "일반 경로",
+                                title = "?쇰컲 寃쎈줈",
                                 supportingText = routeOptionPreviewLabel(routeDistancePreview?.general),
                                 isSelected = selectedRouteMode == RouteMode.GENERAL,
                                 onClick = {
@@ -1455,7 +1363,7 @@ fun MapScreen(
                             )
                             RouteModeButton(
                                 modifier = Modifier.weight(1f),
-                                title = "CCTV·가로등",
+                                title = "CCTV쨌媛濡쒕벑",
                                 supportingText = routeOptionPreviewLabel(routeDistancePreview?.cctvSafe),
                                 isSelected = selectedRouteMode == RouteMode.CCTV_SAFE,
                                 onClick = { selectedRouteMode = RouteMode.CCTV_SAFE }
@@ -1500,11 +1408,11 @@ fun MapScreen(
                 ) {
                     Text(
                         if (uiState.isRouteSearchInProgress) {
-                            "경로 준비 중..."
+                            "寃쎈줈 以鍮?以?.."
                         } else if (isSelectedRoutePreviewLoading) {
-                            "거리 계산 중..."
+                            "嫄곕━ 怨꾩궛 以?.."
                         } else {
-                            "이 경로로 시작"
+                            "??寃쎈줈濡??쒖옉"
                         }
                     )
                 }
@@ -1512,87 +1420,17 @@ fun MapScreen(
         }
     }
 
-    if (isSosSituationDialogVisible) {
-        AlertDialog(
-            onDismissRequest = {
-                if (!isSosAnalysisInProgress) isSosSituationDialogVisible = false
-            },
-            title = { Text("긴급상황 대화") },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    sosChatMessages.forEach { message ->
-                        val prefix = if (message.role == "user") "나" else "앱"
-                        Text("$prefix: ${message.content}")
-                    }
-                    OutlinedTextField(
-                        value = sosSituationMessage,
-                        onValueChange = { sosSituationMessage = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isSosAnalysisInProgress,
-                        label = { Text("답변 입력") },
-                        minLines = 2
-                    )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            modifier = Modifier.weight(1f),
-                            enabled = !isSosAnalysisInProgress,
-                            onClick = { sendSosChatMessage("누군가 따라와요") }
-                        ) {
-                            Text("따라와요")
-                        }
-                        OutlinedButton(
-                            modifier = Modifier.weight(1f),
-                            enabled = !isSosAnalysisInProgress,
-                            onClick = { sendSosChatMessage("말하기 어려워요") }
-                        ) {
-                            Text("말하기 어려움")
-                        }
-                    }
-                    if (isSosAnalysisInProgress) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = !isSosAnalysisInProgress && sosSituationMessage.isNotBlank(),
-                    onClick = { sendSosChatMessage(sosSituationMessage) }
-                ) {
-                    Text("보내기")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    enabled = !isSosAnalysisInProgress,
-                    onClick = {
-                        isSosSituationDialogVisible = false
-                        openEmergencyDialer(context)
-                    }
-                ) {
-                    Text("112 전화")
-                }
-            }
-        )
-    }
 
     sosCountdownSeconds?.let { seconds ->
         AlertDialog(
             onDismissRequest = {},
-            title = { Text("SOS 문자 자동 전송 준비") },
+            title = { Text("SOS 臾몄옄 ?먮룞 ?꾩넚 以鍮?) },
             text = {
                 Text(
                     if (seconds > 0) {
-                        "${seconds}초 후 보호자에게 SOS 문자를 자동으로 전송합니다"
+                        "${seconds}珥???蹂댄샇?먯뿉寃?SOS 臾몄옄瑜??먮룞?쇰줈 ?꾩넚?⑸땲??
                     } else {
-                        "보호자에게 SOS 문자를 전송하는 중입니다"
+                        "蹂댄샇?먯뿉寃?SOS 臾몄옄瑜??꾩넚?섎뒗 以묒엯?덈떎"
                     }
                 )
             },
@@ -1603,16 +1441,16 @@ fun MapScreen(
                         sosCountdownSeconds = null
                     }
                 ) {
-                    Text("지금 전송")
+                    Text("吏湲??꾩넚")
                 }
             },
             dismissButton = {
                 Column {
                     TextButton(onClick = { sosCountdownSeconds = null }) {
-                        Text("취소")
+                        Text("痍⑥냼")
                     }
                     TextButton(onClick = { openEmergencyDialer(context) }) {
-                        Text("112 전화 연결")
+                        Text("112 ?꾪솕 ?곌껐")
                     }
                 }
             }
@@ -1622,8 +1460,8 @@ fun MapScreen(
     if (isArrivalNoticeVisible) {
         AlertDialog(
             onDismissRequest = {},
-            title = { Text("목적지 도착") },
-            text = { Text("목적지에 도착했습니다. 안전한 귀가가 완료되었습니다.") },
+            title = { Text("紐⑹쟻吏 ?꾩갑") },
+            text = { Text("紐⑹쟻吏???꾩갑?덉뒿?덈떎. ?덉쟾??洹媛媛 ?꾨즺?섏뿀?듬땲??") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -1631,7 +1469,7 @@ fun MapScreen(
                         onNavigationFinished()
                     }
                 ) {
-                    Text("홈으로 돌아가기")
+                    Text("?덉쑝濡??뚯븘媛湲?)
                 }
             }
         )
@@ -1640,8 +1478,8 @@ fun MapScreen(
     if (isNavigationEndConfirmationVisible) {
         AlertDialog(
             onDismissRequest = { isNavigationEndConfirmationVisible = false },
-            title = { Text("경로 안내 종료") },
-            text = { Text("현재 경로 안내를 종료하고 홈 화면으로 돌아갈까요?") },
+            title = { Text("寃쎈줈 ?덈궡 醫낅즺") },
+            text = { Text("?꾩옱 寃쎈줈 ?덈궡瑜?醫낅즺?섍퀬 ???붾㈃?쇰줈 ?뚯븘媛덇퉴??") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -1651,12 +1489,12 @@ fun MapScreen(
                         onNavigationFinished()
                     }
                 ) {
-                    Text("종료하기")
+                    Text("醫낅즺?섍린")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { isNavigationEndConfirmationVisible = false }) {
-                    Text("계속 안내")
+                    Text("怨꾩냽 ?덈궡")
                 }
             }
         )
@@ -1665,15 +1503,16 @@ fun MapScreen(
     sosNoticeMessage?.let { message ->
         AlertDialog(
             onDismissRequest = { sosNoticeMessage = null },
-            title = { Text("SOS 설정") },
+            title = { Text("SOS ?ㅼ젙") },
             text = { Text(message) },
             confirmButton = {
                 TextButton(onClick = { sosNoticeMessage = null }) {
-                    Text("확인")
+                    Text("?뺤씤")
                 }
             }
         )
     }
+
 
 }
 
@@ -1703,60 +1542,8 @@ private fun SosFloatingActionButton(
         containerColor = MaterialTheme.colorScheme.error,
         contentColor = MaterialTheme.colorScheme.onError
     ) {
-        Text("SOS\n3초")
+        Text("SOS\n3珥?)
     }
-}
-
-private fun sendGuardianSms(
-    context: Context,
-    guardianPhoneNumber: String,
-    latitude: Double?,
-    longitude: Double?,
-    situationSummary: String?
-): SmsSendRequest? {
-    val locationMessage = if (latitude != null && longitude != null) {
-        "현재 위치: https://maps.google.com/?q=$latitude,$longitude"
-    } else {
-        "현재 위치를 확인할 수 없습니다"
-    }
-    val situationMessage = situationSummary
-        ?.trim()
-        ?.takeIf(String::isNotBlank)
-        ?.let { " 상황: $it" }
-        .orEmpty()
-    val message = "[안전귀가 SOS] 도움이 필요합니다.$situationMessage $locationMessage"
-    return runCatching {
-        val normalizedPhoneNumber = guardianPhoneNumber.filterIndexed { index, character ->
-            character.isDigit() || (character == '+' && index == 0)
-        }
-        require(normalizedPhoneNumber.isNotBlank()) { "Guardian phone number is blank." }
-        val smsManager = context.getSystemService(SmsManager::class.java)
-            ?: error("SMS service is unavailable.")
-        val messageParts = smsManager.divideMessage(message)
-        val requestId = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
-        val sentIntents = ArrayList<PendingIntent>(messageParts.size)
-        messageParts.indices.forEach { partIndex ->
-            val sentIntent = Intent(SOS_SMS_SENT_ACTION)
-                .setPackage(context.packageName)
-                .putExtra(SOS_SMS_REQUEST_ID_KEY, requestId)
-            sentIntents += PendingIntent.getBroadcast(
-                context,
-                requestId + partIndex,
-                sentIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-        }
-        smsManager.sendMultipartTextMessage(
-            normalizedPhoneNumber,
-            null,
-            messageParts,
-            sentIntents,
-            null
-        )
-        SmsSendRequest(requestId = requestId, partCount = messageParts.size)
-    }.onFailure { error ->
-        Log.e(TMAP_LOG_TAG, "Failed to send the guardian SMS.", error)
-    }.getOrNull()
 }
 
 private fun sendGuardianSms(
@@ -1766,11 +1553,11 @@ private fun sendGuardianSms(
     longitude: Double?
 ): SmsSendRequest? {
     val locationMessage = if (latitude != null && longitude != null) {
-        "현재 위치: https://maps.google.com/?q=$latitude,$longitude"
+        "?꾩옱 ?꾩튂: https://maps.google.com/?q=$latitude,$longitude"
     } else {
-        "현재 위치를 확인할 수 없습니다"
+        "?꾩옱 ?꾩튂瑜??뺤씤?????놁뒿?덈떎"
     }
-    val message = "[안전귀가 SOS] 도움이 필요합니다. $locationMessage"
+    val message = "[?덉쟾洹媛 SOS] ?꾩????꾩슂?⑸땲?? $locationMessage"
     return runCatching {
         val normalizedPhoneNumber = guardianPhoneNumber.filterIndexed { index, character ->
             character.isDigit() || (character == '+' && index == 0)
@@ -1805,15 +1592,16 @@ private fun sendGuardianSms(
     }.getOrNull()
 }
 
+
 private fun smsSendFailureMessage(resultCode: Int): String {
     val reason = when (resultCode) {
-        SmsManager.RESULT_ERROR_RADIO_OFF -> "휴대폰 통신 기능이 꺼져 있습니다"
-        SmsManager.RESULT_ERROR_NO_SERVICE -> "통신 서비스에 연결되지 않았습니다"
-        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "문자 전송 한도를 초과했습니다"
-        SmsManager.RESULT_ERROR_FDN_CHECK_FAILURE -> "발신 제한 설정으로 차단되었습니다"
-        else -> "통신사 또는 기기에서 전송을 거절했습니다"
+        SmsManager.RESULT_ERROR_RADIO_OFF -> "?대????듭떊 湲곕뒫??爰쇱졇 ?덉뒿?덈떎"
+        SmsManager.RESULT_ERROR_NO_SERVICE -> "?듭떊 ?쒕퉬?ㅼ뿉 ?곌껐?섏? ?딆븯?듬땲??
+        SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "臾몄옄 ?꾩넚 ?쒕룄瑜?珥덇낵?덉뒿?덈떎"
+        SmsManager.RESULT_ERROR_FDN_CHECK_FAILURE -> "諛쒖떊 ?쒗븳 ?ㅼ젙?쇰줈 李⑤떒?섏뿀?듬땲??
+        else -> "?듭떊???먮뒗 湲곌린?먯꽌 ?꾩넚??嫄곗젅?덉뒿?덈떎"
     }
-    return "SOS 문자 전송에 실패했습니다: $reason"
+    return "SOS 臾몄옄 ?꾩넚???ㅽ뙣?덉뒿?덈떎: $reason"
 }
 
 private fun openEmergencyDialer(context: Context) {
@@ -1873,7 +1661,7 @@ private fun TMapViewContainer(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text(
-                    text = "TMap API 키가 없어 지도를 시작할 수 없습니다.",
+                    text = "TMap API ?ㅺ? ?놁뼱 吏?꾨? ?쒖옉?????놁뒿?덈떎.",
                     style = MaterialTheme.typography.titleMedium
                 )
             }
@@ -2153,13 +1941,13 @@ private fun guidanceDirectionSymbol(guidanceStep: RouteGuidanceStep?): String {
         guidanceStep?.instruction
     ).joinToString(" ")
     return when {
-        guidanceText.contains("좌회전") -> "←"
-        guidanceText.contains("우회전") -> "→"
-        guidanceText.contains("직진") -> "↑"
-        guidanceText.contains("유턴") -> "↩"
-        guidanceText.contains("횡단") || guidanceText.contains("건너") -> "↗"
-        guidanceText.contains("목적지") -> "◎"
-        else -> "◆"
+        guidanceText.contains("醫뚰쉶??) -> "??
+        guidanceText.contains("?고쉶??) -> "??
+        guidanceText.contains("吏곸쭊") -> "??
+        guidanceText.contains("?좏꽩") -> "??
+        guidanceText.contains("?〓떒") || guidanceText.contains("嫄대꼫") -> "??
+        guidanceText.contains("紐⑹쟻吏") -> "??
+        else -> "??
     }
 }
 
@@ -2172,13 +1960,13 @@ private fun RouteDistancePreview?.optionFor(routeMode: RouteMode): RouteOptionPr
 
 private fun routeOptionPreviewLabel(preview: RouteOptionPreview?): String {
     return when {
-        preview == null -> "목적지 선택 후 계산"
-        preview.isLoading -> "계산 중..."
+        preview == null -> "紐⑹쟻吏 ?좏깮 ??怨꾩궛"
+        preview.isLoading -> "怨꾩궛 以?.."
         preview.distanceMeters != null -> {
-            "${formatRouteDistance(preview.distanceMeters)} · 약 ${walkingMinutes(preview.distanceMeters)}분"
+            "${formatRouteDistance(preview.distanceMeters)} 쨌 ??${walkingMinutes(preview.distanceMeters)}遺?
         }
         preview.errorMessage != null -> preview.errorMessage
-        else -> "계산 대기"
+        else -> "怨꾩궛 ?湲?
     }
 }
 
@@ -2187,32 +1975,32 @@ private fun routeSelectionDescription(
     preview: RouteDistancePreview?
 ): String {
     if (preview == null) {
-        return "목적지를 선택하면 실제 보행 거리로 두 경로를 비교합니다."
+        return "紐⑹쟻吏瑜??좏깮?섎㈃ ?ㅼ젣 蹂댄뻾 嫄곕━濡???寃쎈줈瑜?鍮꾧탳?⑸땲??"
     }
     val selectedPreview = preview.optionFor(selectedRouteMode)
     selectedPreview?.statusMessage?.let { return it }
     selectedPreview?.errorMessage?.let { error ->
-        return "$error 선택하면 경로 검색을 다시 시도합니다."
+        return "$error ?좏깮?섎㈃ 寃쎈줈 寃?됱쓣 ?ㅼ떆 ?쒕룄?⑸땲??"
     }
     val selectedDistance = selectedPreview?.distanceMeters
     val generalDistance = preview.general.distanceMeters
     return when (selectedRouteMode) {
         RouteMode.GENERAL -> {
             if (selectedDistance != null) {
-                "거리 중심의 일반 보행 경로입니다."
+                "嫄곕━ 以묒떖???쇰컲 蹂댄뻾 寃쎈줈?낅땲??"
             } else {
-                "일반 경로 거리를 계산하는 중입니다."
+                "?쇰컲 寃쎈줈 嫄곕━瑜?怨꾩궛?섎뒗 以묒엯?덈떎."
             }
         }
         RouteMode.CCTV_SAFE -> {
             if (selectedDistance == null) {
-                return "CCTV와 가로등 공공데이터를 참고해 인접 구간을 계산하는 중입니다."
+                return "CCTV? 媛濡쒕벑 怨듦났?곗씠?곕? 李멸퀬???몄젒 援ш컙??怨꾩궛?섎뒗 以묒엯?덈떎."
             }
             val waypointCount = selectedPreview.waypointCount ?: 0
             val baseDescription = if (waypointCount > 0) {
-                "CCTV·가로등 인접 구간 ${waypointCount}곳을 반영합니다."
+                "CCTV쨌媛濡쒕벑 ?몄젒 援ш컙 ${waypointCount}怨녹쓣 諛섏쁺?⑸땲??"
             } else {
-                "추가 우회 없이 CCTV·가로등 인접 정보를 표시합니다."
+                "異붽? ?고쉶 ?놁씠 CCTV쨌媛濡쒕벑 ?몄젒 ?뺣낫瑜??쒖떆?⑸땲??"
             }
             if (generalDistance == null) {
                 baseDescription
@@ -2233,9 +2021,9 @@ private fun formatRouteDistance(distanceMeters: Int): String {
 
 private fun formatRouteDistanceDelta(deltaMeters: Int): String {
     return when {
-        deltaMeters > 0 -> "일반 경로보다 ${formatRouteDistance(deltaMeters)} 더 깁니다."
-        deltaMeters < 0 -> "일반 경로보다 ${formatRouteDistance(-deltaMeters)} 더 짧습니다."
-        else -> "일반 경로와 거리가 같습니다."
+        deltaMeters > 0 -> "?쇰컲 寃쎈줈蹂대떎 ${formatRouteDistance(deltaMeters)} ??源곷땲??"
+        deltaMeters < 0 -> "?쇰컲 寃쎈줈蹂대떎 ${formatRouteDistance(-deltaMeters)} ??吏㏃뒿?덈떎."
+        else -> "?쇰컲 寃쎈줈? 嫄곕━媛 媛숈뒿?덈떎."
     }
 }
 
@@ -2440,8 +2228,8 @@ private fun showRouteCctvMarkers(
                 setTMapPoint(TMapPoint(coordinate.latitude, coordinate.longitude))
                 setIcon(createRouteCctvIcon())
                 setPosition(0.5f, 0.5f)
-                setCalloutTitle("경로 주변 CCTV ${index + 1}")
-                setCalloutSubTitle("카메라 ${coordinate.cameraCount}대")
+                setCalloutTitle("寃쎈줈 二쇰? CCTV ${index + 1}")
+                setCalloutSubTitle("移대찓??${coordinate.cameraCount}?")
                 setCanShowCallout(true)
                 setVisible(true)
             }
@@ -2473,7 +2261,7 @@ private fun showRouteStreetlightMarkers(
         }
     routeStreetlightCoordinates.forEachIndexed { index, coordinate ->
         val fixtureText = coordinate.fixtureType.takeIf(String::isNotBlank)
-            ?.let { " · $it" }
+            ?.let { " 쨌 $it" }
             .orEmpty()
         view.addTMapMarkerItem(
             TMapMarkerItem().apply {
@@ -2481,8 +2269,8 @@ private fun showRouteStreetlightMarkers(
                 setTMapPoint(TMapPoint(coordinate.latitude, coordinate.longitude))
                 setIcon(createRouteStreetlightIcon())
                 setPosition(0.5f, 0.5f)
-                setCalloutTitle("경로 주변 가로등 ${index + 1}")
-                setCalloutSubTitle("총 ${coordinate.lightCount}등$fixtureText")
+                setCalloutTitle("寃쎈줈 二쇰? 媛濡쒕벑 ${index + 1}")
+                setCalloutSubTitle("珥?${coordinate.lightCount}??fixtureText")
                 setCanShowCallout(true)
                 setVisible(true)
             }
@@ -2926,7 +2714,7 @@ private fun findCctvSafeRouteDistancePreview(
     onCompleted: (CctvSafeRouteDistancePreview) -> Unit,
     onFailed: (String) -> Unit
 ) {
-    onProgress("현재 위치 주변 CCTV를 찾는 중입니다.")
+    onProgress("?꾩옱 ?꾩튂 二쇰? CCTV瑜?李얜뒗 以묒엯?덈떎.")
     findAddressForPoint(startPoint) { startAddress ->
         CctvRepository(view.context).loadCoordinates(
             addressHints = listOf(startAddress, destinationAddress).filter(String::isNotBlank),
@@ -2941,7 +2729,7 @@ private fun findCctvSafeRouteDistancePreview(
             },
             onProgress = onProgress,
             onCompleted = { coordinates ->
-                onProgress("가로등 정보를 경로 점수에 반영하는 중입니다.")
+                onProgress("媛濡쒕벑 ?뺣낫瑜?寃쎈줈 ?먯닔??諛섏쁺?섎뒗 以묒엯?덈떎.")
                 val completeWithStreetlights = { streetlightCoordinates: List<StreetlightCoordinate> ->
                     findValidCctvSafeRouteCandidate(
                         view = view,
@@ -3085,7 +2873,7 @@ private fun findValidCctvSafeRouteCandidate(
             onUnavailable(plan)
             return
         }
-        onProgress("CCTV가 가까운 구간의 실제 보행 경로를 검증하는 중입니다.")
+        onProgress("CCTV媛 媛源뚯슫 援ш컙???ㅼ젣 蹂댄뻾 寃쎈줈瑜?寃利앺븯??以묒엯?덈떎.")
         findSegmentedPedestrianRouteResult(
             view = view,
             routeStops = listOf(startPoint) +
@@ -3107,7 +2895,7 @@ private fun findValidCctvSafeRouteCandidate(
                 hasRepeatedRoadSegment(routeResult.routePoints)
             ) {
                 excludedAddresses += plan.waypoints.map(CctvCoordinate::address)
-                onProgress("같은 길을 반복하는 안전경로 후보를 제외하고 다음 후보를 찾는 중입니다.")
+                onProgress("媛숈? 湲몄쓣 諛섎났?섎뒗 ?덉쟾寃쎈줈 ?꾨낫瑜??쒖쇅?섍퀬 ?ㅼ쓬 ?꾨낫瑜?李얜뒗 以묒엯?덈떎.")
                 tryNextCandidate()
                 return@findSegmentedPedestrianRouteResult
             }
@@ -3151,7 +2939,7 @@ private fun findAndShowSegmentedPedestrianRoute(
     onRouteShown: ((List<TMapPoint>, Int) -> Unit)? = null
 ) {
     if (routeStops.size < 2) {
-        onRouteSearchFailed("경로를 계산할 지점이 부족합니다")
+        onRouteSearchFailed("寃쎈줈瑜?怨꾩궛??吏?먯씠 遺議깊빀?덈떎")
         return
     }
 
@@ -3202,7 +2990,7 @@ private fun findAndShowSegmentedPedestrianRoute(
                     ) {
                         view.post {
                             if (polyLine == null || !appendSegment(polyLine)) {
-                                onRouteSearchFailed("경유 구간 경로 검색 결과가 없습니다")
+                                onRouteSearchFailed("寃쎌쑀 援ш컙 寃쎈줈 寃??寃곌낵媛 ?놁뒿?덈떎")
                                 return@post
                             }
                             segmentIndex += 1
@@ -3214,7 +3002,7 @@ private fun findAndShowSegmentedPedestrianRoute(
         }.onFailure { error ->
             Log.e(TMAP_LOG_TAG, "Failed to search segmented pedestrian route.", error)
             view.post {
-                onRouteSearchFailed(error.message ?: "경유 구간 경로를 검색하지 못했습니다")
+                onRouteSearchFailed(error.message ?: "寃쎌쑀 援ш컙 寃쎈줈瑜?寃?됲븯吏 紐삵뻽?듬땲??)
             }
         }
     }
@@ -3235,13 +3023,13 @@ private fun findAndShowCctvSafeRoute(
     onRoutePointsChanged: (List<TMapPoint>) -> Unit,
     onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
 ) {
-    onRouteSearchProgress("일반 경로 기준 거리를 확인하는 중입니다.")
+    onRouteSearchProgress("?쇰컲 寃쎈줈 湲곗? 嫄곕━瑜??뺤씤?섎뒗 以묒엯?덈떎.")
     findPedestrianRouteDistance(
         view = view,
         startPoint = startPoint,
         destinationPoint = destinationPoint
     ) { generalDistanceMeters ->
-        onRouteSearchProgress("현재 위치 주변 CCTV를 찾는 중입니다.")
+        onRouteSearchProgress("?꾩옱 ?꾩튂 二쇰? CCTV瑜?李얜뒗 以묒엯?덈떎.")
         findAddressForPoint(startPoint) { startAddress ->
             findAndShowCctvSafeRoute(
                 view = view,
@@ -3316,7 +3104,7 @@ private fun findAndShowCctvSafeRoute(
                                 plan.estimatedStreetlightCoverageRatio
                         )
                         onCctvRouteAnalysisChanged(analysis)
-                        onRouteSearchProgress("검증된 CCTV·가로등 안전 경로를 안내합니다.")
+                        onRouteSearchProgress("寃利앸맂 CCTV쨌媛濡쒕벑 ?덉쟾 寃쎈줈瑜??덈궡?⑸땲??")
                         Log.i(
                             TMAP_LOG_TAG,
                             "Showing validated CCTV safe route with ${plan.waypoints.size} waypoints. " +
@@ -3385,7 +3173,7 @@ private fun findAndShowCctvSafeRoute(
                                 )
                             }
                         )
-                        onRouteSearchProgress("유효한 안전 우회 후보가 없어 일반 경로를 안내합니다.")
+                        onRouteSearchProgress("?좏슚???덉쟾 ?고쉶 ?꾨낫媛 ?놁뼱 ?쇰컲 寃쎈줈瑜??덈궡?⑸땲??")
                         findAndShowPedestrianRoute(
                             view = view,
                             startPoint = startPoint,
@@ -3443,7 +3231,7 @@ private fun findAndShowCctvSafeRoute(
                     }
                 )
             }
-            onRouteSearchProgress("가로등 정보를 경로 점수에 반영하는 중입니다.")
+            onRouteSearchProgress("媛濡쒕벑 ?뺣낫瑜?寃쎈줈 ?먯닔??諛섏쁺?섎뒗 以묒엯?덈떎.")
             StreetlightRepository(view.context).loadCoordinates(
                 onCompleted = showPlanWithStreetlights,
                 onFailed = { error ->
@@ -3637,10 +3425,10 @@ private fun reverseGeocodeDestination(
             override fun onReverseGeocoding(addressInfo: TMapAddressInfo?) {
                 val name = addressInfo?.strBuildingName
                     ?.takeIf(String::isNotBlank)
-                    ?: "지도에서 선택한 위치"
+                    ?: "吏?꾩뿉???좏깮???꾩튂"
                 val address = addressInfo?.strFullAddress
                     ?.takeIf(String::isNotBlank)
-                    ?: "주소 정보 없음"
+                    ?: "二쇱냼 ?뺣낫 ?놁쓬"
                 Handler(Looper.getMainLooper()).post {
                     onCompleted(
                         DestinationSearchResult(
@@ -3698,7 +3486,7 @@ private fun showPedestrianRoute(
     onRouteShown: ((List<TMapPoint>, Int) -> Unit)? = null
 ) {
     if (polyLine == null || polyLine.linePointList.isEmpty()) {
-        onRouteSearchFailed("경로 검색 결과가 없습니다")
+        onRouteSearchFailed("寃쎈줈 寃??寃곌낵媛 ?놁뒿?덈떎")
         return
     }
     runCatching {
@@ -3802,7 +3590,7 @@ private fun deriveRouteGuidanceSteps(routePoints: List<TMapPoint>): List<RouteGu
             continue
         }
 
-        val maneuver = if (turnDegrees > 0f) "우회전하세요" else "좌회전하세요"
+        val maneuver = if (turnDegrees > 0f) "?고쉶?꾪븯?몄슂" else "醫뚰쉶?꾪븯?몄슂"
         guidanceSteps += RouteGuidanceStep(
             instruction = maneuver,
             maneuver = maneuver,
@@ -3814,8 +3602,8 @@ private fun deriveRouteGuidanceSteps(routePoints: List<TMapPoint>): List<RouteGu
 
     val destinationPoint = routePoints.last()
     guidanceSteps += RouteGuidanceStep(
-        instruction = "목적지에 도착합니다",
-        maneuver = "목적지 도착",
+        instruction = "紐⑹쟻吏???꾩갑?⑸땲??,
+        maneuver = "紐⑹쟻吏 ?꾩갑",
         latitude = destinationPoint.latitude,
         longitude = destinationPoint.longitude
     )
@@ -3940,21 +3728,21 @@ private fun Element.findFirstDescendantText(localName: String): String? {
 
 private fun maneuverLabel(turnType: Int?, pointType: String): String {
     return when (turnType) {
-        11 -> "직진하세요"
-        12 -> "좌회전하세요"
-        13 -> "우회전하세요"
-        14 -> "유턴하세요"
-        16, 17 -> "왼쪽 방향으로 이동하세요"
-        18, 19 -> "오른쪽 방향으로 이동하세요"
-        125 -> "육교를 이용하세요"
-        126 -> "지하보도를 이용하세요"
-        127 -> "계단을 이용하세요"
-        211 -> "횡단보도를 건너세요"
-        212 -> "좌측 횡단보도를 건너세요"
-        213 -> "우측 횡단보도를 건너세요"
+        11 -> "吏곸쭊?섏꽭??
+        12 -> "醫뚰쉶?꾪븯?몄슂"
+        13 -> "?고쉶?꾪븯?몄슂"
+        14 -> "?좏꽩?섏꽭??
+        16, 17 -> "?쇱そ 諛⑺뼢?쇰줈 ?대룞?섏꽭??
+        18, 19 -> "?ㅻⅨ履?諛⑺뼢?쇰줈 ?대룞?섏꽭??
+        125 -> "?↔탳瑜??댁슜?섏꽭??
+        126 -> "吏?섎낫?꾨? ?댁슜?섏꽭??
+        127 -> "怨꾨떒???댁슜?섏꽭??
+        211 -> "?〓떒蹂대룄瑜?嫄대꼫?몄슂"
+        212 -> "醫뚯륫 ?〓떒蹂대룄瑜?嫄대꼫?몄슂"
+        213 -> "?곗륫 ?〓떒蹂대룄瑜?嫄대꼫?몄슂"
         else -> when {
-            pointType.startsWith("SP") -> "경로 안내를 시작합니다"
-            pointType.startsWith("EP") -> "목적지에 도착합니다"
+            pointType.startsWith("SP") -> "寃쎈줈 ?덈궡瑜??쒖옉?⑸땲??
+            pointType.startsWith("EP") -> "紐⑹쟻吏???꾩갑?⑸땲??
             else -> ""
         }
     }
@@ -4199,10 +3987,10 @@ private fun searchDestinationPoi(
 private fun destinationSearchQueries(query: String): List<String> {
     val trimmedQuery = query.trim()
     if (trimmedQuery.isBlank()) return emptyList()
-    if (trimmedQuery.contains("구미", ignoreCase = true)) return listOf(trimmedQuery)
+    if (trimmedQuery.contains("援щ?", ignoreCase = true)) return listOf(trimmedQuery)
     return listOf(
-        "구미 $trimmedQuery",
-        "구미시 $trimmedQuery",
+        "援щ? $trimmedQuery",
+        "援щ???$trimmedQuery",
         trimmedQuery
     ).distinct()
 }
@@ -4237,8 +4025,8 @@ private fun prioritizeGumiSearchResults(
 }
 
 private fun DestinationSearchResult.isGumiSearchResult(): Boolean {
-    return name.contains("구미", ignoreCase = true) ||
-        address.contains("구미", ignoreCase = true) ||
+    return name.contains("援щ?", ignoreCase = true) ||
+        address.contains("援щ?", ignoreCase = true) ||
         distanceFromGumiCenterMeters() <= GUMI_PRIORITY_RADIUS_METERS
 }
 
@@ -4328,7 +4116,7 @@ private fun startCurrentLocationUpdates(
 ): () -> Unit {
     val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
     if (locationManager == null) {
-        onLocationUnavailable("위치 서비스를 사용할 수 없습니다")
+        onLocationUnavailable("?꾩튂 ?쒕퉬?ㅻ? ?ъ슜?????놁뒿?덈떎")
         return {}
     }
 
@@ -4338,7 +4126,7 @@ private fun startCurrentLocationUpdates(
     ).filter(locationManager::isProviderEnabled)
 
     if (enabledProviders.isEmpty()) {
-        onLocationUnavailable("활성화된 위치 공급자가 없습니다")
+        onLocationUnavailable("?쒖꽦?붾맂 ?꾩튂 怨듦툒?먭? ?놁뒿?덈떎")
         return {}
     }
 
@@ -4380,13 +4168,13 @@ private fun fetchCurrentLocation(
         Manifest.permission.ACCESS_FINE_LOCATION
     ) == PackageManager.PERMISSION_GRANTED
     if (!hasPermission) {
-        onLocationUnavailable("위치 권한이 없습니다")
+        onLocationUnavailable("?꾩튂 沅뚰븳???놁뒿?덈떎")
         return
     }
 
     val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
     if (locationManager == null) {
-        onLocationUnavailable("위치 서비스를 사용할 수 없습니다")
+        onLocationUnavailable("?꾩튂 ?쒕퉬?ㅻ? ?ъ슜?????놁뒿?덈떎")
         return
     }
 
@@ -4445,6 +4233,6 @@ private fun fallbackToLastKnownLocation(
             lastKnownLocation.bearing
         )
     } else {
-        onLocationUnavailable("아직 위치를 확인하지 못했습니다")
+        onLocationUnavailable("?꾩쭅 ?꾩튂瑜??뺤씤?섏? 紐삵뻽?듬땲??)
     }
 }
