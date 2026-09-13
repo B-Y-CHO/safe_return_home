@@ -30,7 +30,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     fun onMapReady() {
         _uiState.value = _uiState.value.copy(
             mapStatusLabel = "지도가 준비되었습니다. 현재 위치를 확인하는 중입니다.",
-            routeSummary = "현재 단계: 내 위치로 지도를 이동합니다.",
+            routeSummary = "현재 단계: 현 위치로 지도를 이동합니다.",
             isMapReady = true
         )
     }
@@ -46,9 +46,9 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             isLocationPermissionGranted = isGranted,
             currentLocationLabel = if (isGranted) {
-                "위치 권한이 허용되었습니다. 현재 위치를 불러오는 중입니다."
+                "위치 권한을 허용했습니다. 현재 위치를 불러오는 중입니다."
             } else {
-                "위치 권한이 거부되어 현재 위치를 불러올 수 없습니다."
+                "위치 권한을 거부하여 현재 위치를 불러올 수 없습니다."
             }
         )
     }
@@ -148,7 +148,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
             routeSearchMessage = "보행자 경로를 지도에 표시했습니다.",
-            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분",
+            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 보행 시간: 약 ${walkingMinutes}분",
             initialRouteDistanceMeters = initialRouteDistanceMeters,
             remainingRouteDistanceMeters = distanceMeters,
             routeProgress = progress,
@@ -165,7 +165,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
     fun onRouteSearchFailed(reason: String) {
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
-            routeSearchMessage = "보행자 경로를 불러오지 못했습니다: $reason"
+            routeSearchMessage = "보행자 경로를 불러오지 못했습니다. $reason"
         )
     }
 
@@ -174,7 +174,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         val initialRouteDistanceMeters = _uiState.value.initialRouteDistanceMeters ?: distanceMeters
         val progress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
         _uiState.value = _uiState.value.copy(
-            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분",
+            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 보행 시간: 약 ${walkingMinutes}분",
             remainingRouteDistanceMeters = distanceMeters,
             routeProgress = progress
         )
@@ -221,7 +221,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
             routeSearchMessage = "목적지에 도착했습니다.",
-            routeSummary = "남은 보행 경로: 0m · 예상 도보 시간: 0분",
+            routeSummary = "남은 보행 경로: 0m · 예상 보행 시간: 0분",
             remainingRouteDistanceMeters = 0,
             routeProgress = 1f,
             isNavigationActive = false
@@ -284,7 +284,7 @@ class MapViewModel(application: Application) : AndroidViewModel(application) {
         )
         val distanceMeters = distanceResult[0].toInt()
         val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
-        return "직선 거리: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분"
+        return "직선 거리: ${distanceMeters}m · 예상 보행 시간: 약 ${walkingMinutes}분"
     }
 
     private fun gpsSignalLabel(accuracyMeters: Float): String {
