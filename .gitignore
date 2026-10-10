@@ -1,6 +1,8 @@
 *.iml
 .gradle
+.kotlin/
 /local.properties
+/app/google-services.json
 /.idea/
 /.idea/caches
 /.idea/libraries
@@ -14,3 +16,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+server/.venv/
+server/__pycache__/
+/android-sdk/
+/.tmp-smartcctv/
+/tmap_extracted/
+/tmap.zip
+/*.png

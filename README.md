@@ -37,6 +37,18 @@
 - 안내 시작, 재탐색, 도착 시 진동 및 TTS 음성 안내
 - 안내 중 화면 자동 꺼짐 방지
 
+### CCTV·가로등·생활안전지도를 반영한 안심경로
+
+- CCTV 경유지 그래프에서 A* 탐색으로 경유지를 최대 3개 선정
+- 시설 기반 경로 최대 2개와 일반경로를 실제 TMap 보행경로로 비교
+- CCTV·가로등 근접도, 범죄주의구간 등급과 통과 거리, 우회 거리를 함께 고려
+- 생활안전지도 WMS 이미지를 공식 범례에 따라 분석하며, 표시 스위치와 별도로 경로 계산에 반영
+- 일반경로 대비 추가 거리는 일반경로 거리의 30%와 100m 중 큰 값으로 제한
+- 주의구간 분석에 필요한 데이터가 부족하거나 조회가 실패하면 시설 기반 경로 사용
+- 지도에 보이는 시설 마커만 선별하고 변경된 마커를 나누어 갱신
+
+시설 근접도와 지도 등급은 경로 비교용 지표입니다. 실제 CCTV 촬영 범위, 조도 또는 실시간 범죄 위험을 측정한 값은 아닙니다.
+
 ### 지도 방향 모드
 
 - 진행 방향 모드: 휴대폰이 향하는 방향이 지도 위쪽을 향하도록 회전
@@ -82,11 +94,21 @@ cd safe_return_home
 ```properties
 sdk.dir=C\:\\Users\\<YOUR_NAME>\\AppData\\Local\\Android\\Sdk
 TMAP_API_KEY=your_tmap_api_key
+SAFEMAP_API_KEY=your_safemap_api_key
+CCTV_API_ENDPOINT=your_cctv_api_endpoint
+CCTV_API_KEY=your_cctv_api_key
+CCTV_CRIME_PREVENTION_API_ENDPOINT=your_crime_prevention_cctv_endpoint
+CCTV_CHILD_PARK_API_ENDPOINT=your_child_park_cctv_endpoint
+STREETLIGHT_API_KEY=your_streetlight_api_key
 ```
 
 Windows의 `.properties` 파일에서는 드라이브 구분자와 경로 구분자를 이스케이프해야 합니다.
 
 `local.properties`는 Git에 포함하지 마세요. API 키를 README, 소스 코드, 이슈, 커밋에 직접 작성하면 안 됩니다.
+
+CCTV 관련 엔드포인트는 사용하는 공공데이터 API에 맞게 설정합니다. 가로등 엔드포인트는 기본값을 사용하며, 변경이 필요하면 `STREETLIGHT_API_ENDPOINT`를 추가합니다. 생활안전지도 인증키는 생활안전지도에서 발급받습니다.
+
+Firebase 인증을 사용하는 경우 해당 프로젝트의 `google-services.json`을 `app/`에 별도로 배치합니다. 이 파일과 API 키, SDK, 빌드 결과, 임시 검증 파일은 저장소에 포함하지 않습니다.
 
 ### 3. TMap API 권한 확인
 
@@ -142,13 +164,19 @@ $env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
 | `ACCESS_COARSE_LOCATION` | 대략적인 위치 확인 |
 | `ACCESS_FINE_LOCATION` | GPS 기반 현재 위치 추적 |
 | `VIBRATE` | 안내 시작, 재탐색, 도착 진동 알림 |
-| `POST_NOTIFICATIONS` | 향후 알림 기능 확장을 위한 선언 |
+| `POST_NOTIFICATIONS` | 경로 안내 서비스 알림 |
+| `FOREGROUND_SERVICE` | 경로 안내 서비스 실행 |
+| `FOREGROUND_SERVICE_LOCATION` | 위치를 사용하는 경로 안내 서비스 |
+| `SEND_SMS` | 보호자에게 SOS 문자 전송 |
 
 ## 프로젝트 구조
 
 ```text
 app/src/main/java/com/bycho/safereturnhome/
+├── data/                      # 시설 데이터, 경로 탐색, 생활안전지도 분석
 ├── navigation/                # Compose Navigation 경로
+├── network/                   # 위험 이벤트 수신
+├── service/                   # 경로 안내 서비스
 ├── ui/screen/home/            # 홈 화면
 ├── ui/screen/map/             # 지도 설정 및 경로 안내 화면
 ├── ui/screen/trip/            # 기존 이동 상태 화면
@@ -162,15 +190,16 @@ app/libs/
 
 ## 알려진 제한 사항
 
-- 백그라운드 위치 추적과 Foreground Service는 아직 구현되어 있지 않습니다.
 - 앱이 백그라운드로 전환되면 지속 안내를 보장하지 않습니다.
-- 턴바이턴 좌회전, 우회전 안내는 아직 제공하지 않습니다.
+- 생활안전지도 분석은 지도 이미지 기반 근사 분석입니다. 분석 영역이 커서 충분한 해상도를 확보하지 못하면 시설 기반 경로를 사용합니다.
+- 한정된 후보 중 경로를 선택하므로 모든 도로에 대한 최적 경로나 실제 안전을 보장하지 않습니다.
+- 실제 기기의 경로 선택, 위치 갱신, 음성 안내는 추가 확인이 필요합니다.
 - TTS 음성은 기기의 한국어 TTS 엔진과 미디어 볼륨 설정에 영향을 받습니다.
 - 방향 센서가 없는 기기에서는 GPS 이동 방향을 사용합니다.
 - GPS 정확도가 낮은 실내에서는 경로 이탈 판정이 흔들릴 수 있습니다.
 
 ## 보안 주의 사항
 
-- `TMAP_API_KEY`는 `local.properties`에만 저장합니다.
+- TMap, 생활안전지도, CCTV·가로등 API 키는 `local.properties`에만 저장합니다.
 - API 키가 포함된 파일을 Git에 커밋하지 않습니다.
 - 로그, 이슈, 스크린샷에 API 키가 노출되지 않도록 확인합니다.

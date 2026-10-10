@@ -1,16 +1,25 @@
 package com.bycho.safereturnhome.ui.viewmodel
 
+import android.app.Application
+import android.content.Intent
 import android.location.Location
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import com.bycho.safereturnhome.BuildConfig
+import com.bycho.safereturnhome.service.NavigationService
 import com.bycho.safereturnhome.ui.state.DestinationSearchResult
 import com.bycho.safereturnhome.ui.state.MapUiState
+import com.bycho.safereturnhome.ui.state.withNavigationStopped
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-class MapViewModel : ViewModel() {
+class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val hasApiKey = BuildConfig.TMAP_API_KEY.isNotBlank()
+    private var routeSearchTimeout: Job? = null
 
     private val _uiState = MutableStateFlow(
         MapUiState(
@@ -27,7 +36,7 @@ class MapViewModel : ViewModel() {
     fun onMapReady() {
         _uiState.value = _uiState.value.copy(
             mapStatusLabel = "지도가 준비되었습니다. 현재 위치를 확인하는 중입니다.",
-            routeSummary = "현재 단계: 내 위치로 지도를 이동합니다.",
+            routeSummary = "현재 단계: 현 위치로 지도를 이동합니다.",
             isMapReady = true
         )
     }
@@ -43,9 +52,9 @@ class MapViewModel : ViewModel() {
         _uiState.value = _uiState.value.copy(
             isLocationPermissionGranted = isGranted,
             currentLocationLabel = if (isGranted) {
-                "위치 권한이 허용되었습니다. 현재 위치를 불러오는 중입니다."
+                "위치 권한을 허용했습니다. 현재 위치를 불러오는 중입니다."
             } else {
-                "위치 권한이 거부되어 현재 위치를 불러올 수 없습니다."
+                "위치 권한을 거부하여 현재 위치를 불러올 수 없습니다."
             }
         )
     }
@@ -106,10 +115,13 @@ class MapViewModel : ViewModel() {
     }
 
     fun onDestinationSelected(destination: DestinationSearchResult) {
+        routeSearchTimeout?.cancel()
         val currentLatitude = _uiState.value.currentLatitude
         val currentLongitude = _uiState.value.currentLongitude
         _uiState.value = _uiState.value.copy(
             selectedDestination = destination,
+            isRouteSearchInProgress = false,
+            routeSearchMessage = null,
             destinationSearchResults = emptyList(),
             destinationLabel = "목적지: ${destination.name}",
             initialRouteDistanceMeters = null,
@@ -124,57 +136,160 @@ class MapViewModel : ViewModel() {
     }
 
     fun onRouteSearchStarted() {
+        startRouteSearchTimeout()
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = true,
-            routeSearchMessage = null
+            routeSearchMessage = "경로를 검색하는 중입니다."
+        )
+    }
+
+    fun onRouteSearchProgress(message: String) {
+        if (!_uiState.value.isRouteSearchInProgress) return
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = true,
+            routeSearchMessage = message
         )
     }
 
     fun onRouteSearchCompleted(distanceMeters: Int) {
+        if (!_uiState.value.isRouteSearchInProgress) return
+        routeSearchTimeout?.cancel()
         val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
         val initialRouteDistanceMeters = _uiState.value.initialRouteDistanceMeters ?: distanceMeters
+        val shouldStartNavigation = !_uiState.value.isNavigationActive
+        val progress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
             routeSearchMessage = "보행자 경로를 지도에 표시했습니다.",
-            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분",
+            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 보행 시간: 약 ${walkingMinutes}분",
             initialRouteDistanceMeters = initialRouteDistanceMeters,
             remainingRouteDistanceMeters = distanceMeters,
-            routeProgress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
+            routeProgress = progress,
+            isNavigationActive = true
+        )
+        if (shouldStartNavigation) startNavigationService()
+        updateServiceNotification(
+            progress = (progress * 100).toInt(),
+            remainingDistance = distanceMeters,
+            etaMinutes = walkingMinutes
         )
     }
 
     fun onRouteSearchFailed(reason: String) {
+        if (!_uiState.value.isRouteSearchInProgress) return
+        routeSearchTimeout?.cancel()
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
-            routeSearchMessage = "보행자 경로를 불러오지 못했습니다: $reason"
+            routeSearchMessage = "보행자 경로를 불러오지 못했습니다. $reason"
         )
     }
 
     fun onRemainingRouteDistanceChanged(distanceMeters: Int) {
         val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
         val initialRouteDistanceMeters = _uiState.value.initialRouteDistanceMeters ?: distanceMeters
+        val progress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
         _uiState.value = _uiState.value.copy(
-            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분",
+            routeSummary = "남은 보행 경로: ${distanceMeters}m · 예상 보행 시간: 약 ${walkingMinutes}분",
             remainingRouteDistanceMeters = distanceMeters,
-            routeProgress = calculateRouteProgress(initialRouteDistanceMeters, distanceMeters)
+            routeProgress = progress
         )
+        if (_uiState.value.isNavigationActive) {
+            updateServiceNotification(
+                progress = (progress * 100).toInt(),
+                remainingDistance = distanceMeters,
+                etaMinutes = walkingMinutes
+            )
+        }
     }
 
     fun onRouteRecalculationStarted() {
+        if (!_uiState.value.isNavigationActive) return
+        startRouteSearchTimeout()
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = true,
             routeSearchMessage = "경로를 벗어났습니다. 보행자 경로를 다시 검색합니다."
         )
     }
 
+    fun onHazardRerouteStarted(message: String) {
+        if (!_uiState.value.isNavigationActive) return
+        startRouteSearchTimeout()
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = true,
+            routeSearchMessage = message
+        )
+    }
+
+    fun onHazardRerouteCompleted(distanceMeters: Int) {
+        onRouteSearchCompleted(distanceMeters)
+        val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
+        _uiState.value = _uiState.value.copy(
+            routeSearchMessage = "위험지점 감지로 우회 경로를 안내합니다.",
+            routeSummary = "위험지점 우회 중 · 남은 경로: ${distanceMeters}m · 약 ${walkingMinutes}분"
+        )
+    }
+
+    fun onHazardRerouteFailed(message: String) {
+        routeSearchTimeout?.cancel()
+        _uiState.value = _uiState.value.copy(
+            isRouteSearchInProgress = false,
+            routeSearchMessage = message
+        )
+    }
+
     fun onDestinationArrived() {
+        routeSearchTimeout?.cancel()
         _uiState.value = _uiState.value.copy(
             isRouteSearchInProgress = false,
             routeSearchMessage = "목적지에 도착했습니다.",
-            routeSummary = "남은 보행 경로: 0m · 예상 도보 시간: 0분",
+            routeSummary = "남은 보행 경로: 0m · 예상 보행 시간: 0분",
             remainingRouteDistanceMeters = 0,
-            routeProgress = 1f
+            routeProgress = 1f,
+            isNavigationActive = false
         )
+        stopNavigationService()
+    }
+
+    fun stopNavigation() {
+        routeSearchTimeout?.cancel()
+        val wasActive = _uiState.value.isNavigationActive
+        _uiState.value = _uiState.value.withNavigationStopped()
+        if (wasActive) stopNavigationService()
+    }
+
+    private fun startRouteSearchTimeout() {
+        routeSearchTimeout?.cancel()
+        routeSearchTimeout = viewModelScope.launch {
+            delay(120_000)
+            onRouteSearchFailed("경로 요청 시간이 초과되었습니다. 다시 시도해 주세요.")
+        }
+    }
+
+    private fun startNavigationService() {
+        val application = getApplication<Application>()
+        val intent = Intent(application, NavigationService::class.java).apply {
+            action = NavigationService.ACTION_START
+        }
+        application.startForegroundService(intent)
+    }
+
+    private fun updateServiceNotification(progress: Int, remainingDistance: Int, etaMinutes: Int) {
+        val application = getApplication<Application>()
+        val intent = Intent(application, NavigationService::class.java).apply {
+            action = NavigationService.ACTION_UPDATE
+            putExtra(NavigationService.EXTRA_PROGRESS, progress)
+            putExtra(NavigationService.EXTRA_REMAINING_DISTANCE, remainingDistance)
+            putExtra(NavigationService.EXTRA_ETA_MINUTES, etaMinutes)
+        }
+        application.startService(intent)
+    }
+
+    private fun stopNavigationService() {
+        val application = getApplication<Application>()
+        val intent = Intent(application, NavigationService::class.java).apply {
+            action = NavigationService.ACTION_STOP
+        }
+        application.startService(intent)
     }
 
     private fun calculateRouteProgress(initialDistanceMeters: Int, remainingDistanceMeters: Int): Float {
@@ -198,7 +313,7 @@ class MapViewModel : ViewModel() {
         )
         val distanceMeters = distanceResult[0].toInt()
         val walkingMinutes = (distanceMeters / 80f).toInt().coerceAtLeast(1)
-        return "직선 거리: ${distanceMeters}m · 예상 도보 시간: 약 ${walkingMinutes}분"
+        return "직선 거리: ${distanceMeters}m · 예상 보행 시간: 약 ${walkingMinutes}분"
     }
 
     private fun gpsSignalLabel(accuracyMeters: Float): String {
