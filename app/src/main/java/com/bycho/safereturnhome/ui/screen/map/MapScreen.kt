@@ -106,6 +106,8 @@ import com.bycho.safereturnhome.data.ServerPreferences
 import com.bycho.safereturnhome.data.StreetlightCoordinate
 import com.bycho.safereturnhome.data.SafeMapRouteChoice
 import com.bycho.safereturnhome.data.SafeMapRouteRiskRepository
+import com.bycho.safereturnhome.data.SafeMapCandidatePlanner
+import com.bycho.safereturnhome.data.SafeMapBounds
 import com.bycho.safereturnhome.data.chooseSafeMapRoute
 import com.bycho.safereturnhome.data.isSafeRouteDetourAllowed
 import com.bycho.safereturnhome.data.StreetlightRepository
@@ -2330,11 +2332,11 @@ private fun routeSelectionDescription(
         }
         RouteMode.CCTV_SAFE -> {
             if (selectedDistance == null) {
-                return "CCTV와 가로등 공공데이터를 참고해 인접 구간을 계산하는 중입니다."
+                return "범죄주의구간과 CCTV·가로등 정보를 참고해 경로를 계산하는 중입니다."
             }
             val waypointCount = selectedPreview.waypointCount ?: 0
             val baseDescription = if (waypointCount > 0) {
-                "CCTV·가로등 인접 구간 ${waypointCount}곳을 반영합니다."
+                "안심경로 경유지 ${waypointCount}곳을 반영합니다."
             } else {
                 "추가 우회 없이 CCTV·가로등 인접 정보를 표시합니다."
             }
@@ -3040,6 +3042,29 @@ private fun findPedestrianRouteDistance(
     }
 }
 
+private fun loadSafeRouteCctvCoordinates(
+    view: TMapView,
+    addressHints: List<String>,
+    hasEnoughCoordinates: (List<CctvCoordinate>) -> Boolean,
+    isRequestActive: () -> Boolean,
+    onProgress: (String) -> Unit,
+    onCompleted: (List<CctvCoordinate>) -> Unit
+) {
+    CctvRepository(view.context).loadCoordinates(
+        addressHints = addressHints,
+        hasEnoughCoordinates = hasEnoughCoordinates,
+        isRequestActive = isRequestActive,
+        onProgress = onProgress,
+        onCompleted = onCompleted,
+        onFailed = {
+            if (isRequestActive()) {
+                Log.w(TMAP_LOG_TAG, "CCTV coordinates unavailable; continuing with SafeMap and streetlights.")
+                onCompleted(emptyList())
+            }
+        }
+    )
+}
+
 private fun findCctvSafeRouteDistancePreview(
     view: TMapView,
     startPoint: TMapPoint,
@@ -3056,7 +3081,8 @@ private fun findCctvSafeRouteDistancePreview(
     onProgress("현재 위치 주변 CCTV를 찾는 중입니다.")
     findAddressForPoint(startPoint) { startAddress ->
         if (!isRequestActive()) return@findAddressForPoint
-        CctvRepository(view.context).loadCoordinates(
+        loadSafeRouteCctvCoordinates(
+            view = view,
             addressHints = listOf(startAddress, destinationAddress).filter(String::isNotBlank),
             hasEnoughCoordinates = { coordinates ->
                 CctvSafeRoutePlanner.countRelevantCoordinates(
@@ -3070,7 +3096,7 @@ private fun findCctvSafeRouteDistancePreview(
             isRequestActive = isRequestActive,
             onProgress = onProgress,
             onCompleted = { coordinates ->
-                if (!isRequestActive()) return@loadCoordinates
+                if (!isRequestActive()) return@loadSafeRouteCctvCoordinates
                 onProgress("가로등 정보를 경로 점수에 반영하는 중입니다.")
                 val completeWithStreetlights = { streetlightCoordinates: List<StreetlightCoordinate> ->
                     findValidCctvSafeRouteCandidate(
@@ -3087,7 +3113,7 @@ private fun findCctvSafeRouteDistancePreview(
                             onCompleted(
                                 CctvSafeRouteDistancePreview(
                                     distanceMeters = routeResult.distanceMeters,
-                                    waypointCount = plan.waypoints.size,
+                                    waypointCount = plan.waypointCount,
                                     candidateCctvCount = plan.candidateCctvCount
                                 )
                             )
@@ -3110,8 +3136,7 @@ private fun findCctvSafeRouteDistancePreview(
                         completeWithStreetlights(emptyList())
                     }
                 )
-            },
-            onFailed = onFailed
+            }
         )
     }
 }
@@ -3205,6 +3230,7 @@ private fun findValidCctvSafeRouteCandidate(
         val excludedAddresses = mutableSetOf<String>()
         var lastPlan: CctvSafeRoutePlan? = null
         var baselineDistance = generalDistanceMeters
+        var generalRoute: SegmentedPedestrianRouteResult? = null
 
         suspend fun walkingRoute(stops: List<TMapPoint>): SegmentedPedestrianRouteResult? =
             withTimeoutOrNull(8_000) {
@@ -3220,10 +3246,8 @@ private fun findValidCctvSafeRouteCandidate(
 
         // Bound SDK work as well as candidate count. Keep valid results if a later request stalls.
         withTimeoutOrNull(25_000) {
-            if (baselineDistance == null) {
-                val baseline = walkingRoute(listOf(startPoint, destinationPoint))
-                baselineDistance = baseline?.distanceMeters
-            }
+            generalRoute = walkingRoute(listOf(startPoint, destinationPoint))
+            generalRoute?.let { baselineDistance = it.distanceMeters }
             var attempts = 0
             while (isRequestActive() && candidates.size < 2 && attempts++ < 4) {
                 val plan = withContext(Dispatchers.Default) {
@@ -3253,32 +3277,71 @@ private fun findValidCctvSafeRouteCandidate(
                     }) candidates += plan to result
             }
             if (!isRequestActive()) return@withTimeoutOrNull
-            val generalRoute = walkingRoute(listOf(startPoint, destinationPoint))
-            if (generalRoute != null && generalRoute.routePoints.size >= 2) {
-                baselineDistance = generalRoute.distanceMeters
-                candidates.removeAll { !isSafeRouteDetourAllowed(baselineDistance, it.second.distanceMeters) }
-                val emptyPlan = lastPlan?.copy(waypoints = emptyList()) ?:
-                    CctvSafeRoutePlan(emptyList(), generalRoute.distanceMeters, 0.0, 0.0, 0.0, 0)
-                candidates += emptyPlan to generalRoute
-            }
+        }
+        // Retain the baseline even when later SDK requests exhaust their time budget.
+        generalRoute?.takeIf { it.routePoints.size >= 2 }?.let { baseline ->
+            candidates.removeAll { !isSafeRouteDetourAllowed(baseline.distanceMeters, it.second.distanceMeters) }
+            val emptyPlan = lastPlan?.copy(waypoints = emptyList()) ?:
+                CctvSafeRoutePlan(emptyList(), baseline.distanceMeters, 0.0, 0.0, 0.0, 0)
+            candidates += emptyPlan to baseline
         }
         if (!isRequestActive()) return@launch
         if (candidates.isEmpty()) {
             onUnavailable(lastPlan)
             return@launch
         }
-        val routes = candidates.map { (_, route) ->
+        fun candidateRoutes() = candidates.map { (_, route) ->
             route.routePoints.map { RouteCoordinate(it.latitude, it.longitude) }
         }
+        val referenceRoute = (generalRoute ?: candidates.first().second).routePoints
+            .map { RouteCoordinate(it.latitude, it.longitude) }
+        onProgress("생활안전지도에서 우회 가능한 도로를 찾는 중입니다.")
+        val candidateRaster = withTimeoutOrNull(13_000) {
+            SafeMapRouteRiskRepository.load(candidateRoutes(),
+                marginMeters = SafeMapCandidatePlanner.corridorMeters(referenceRoute) + 60.0)
+        }
+        if (!isRequestActive()) return@launch
+        if (candidateRaster != null) {
+            val riskPlans = withContext(Dispatchers.Default) {
+                SafeMapCandidatePlanner.plan(referenceRoute, candidateRaster, MAX_CCTV_WAYPOINT_COUNT)
+            }
+            withTimeoutOrNull(16_000) {
+                for (waypoints in riskPlans) {
+                    if (!isRequestActive()) return@withTimeoutOrNull
+                    onProgress("범죄주의등급을 반영한 우회경로를 확인하는 중입니다.")
+                    val result = walkingRoute(listOf(startPoint) + waypoints.map {
+                        TMapPoint(it.latitude, it.longitude)
+                    } + destinationPoint)
+                    if (result == null || result.routePoints.size < 2 ||
+                        !isSafeRouteDetourAllowed(baselineDistance, result.distanceMeters) ||
+                        hasRepeatedRoadSegment(result.routePoints)) continue
+                    if (candidates.none { existing ->
+                            existing.second.routePoints.map { Pair(it.latitude, it.longitude) } ==
+                                result.routePoints.map { Pair(it.latitude, it.longitude) }
+                        }) {
+                        candidates += CctvSafeRoutePlan(emptyList(), result.distanceMeters,
+                            0.0, 0.0, 0.0, 0, riskWaypoints = waypoints) to result
+                    }
+                }
+            }
+        }
+        if (!isRequestActive()) return@launch
+        val routes = candidateRoutes()
         val scoredPlans = withContext(Dispatchers.Default) {
             candidates.mapIndexed { index, (plan, _) ->
                 CctvSafeRoutePlanner.evaluateWalkingRoute(routes[index], cctvCoordinates, streetlightCoordinates)
-                    .copy(waypoints = plan.waypoints, candidateCctvCount = plan.candidateCctvCount)
+                    .copy(waypoints = plan.waypoints, riskWaypoints = plan.riskWaypoints,
+                        candidateCctvCount = plan.candidateCctvCount)
             }
         }
         if (!isRequestActive()) return@launch
         onProgress("생활안전지도 범죄주의구간 통과를 비교하는 중입니다.")
-        val raster = withTimeoutOrNull(13_000) { SafeMapRouteRiskRepository.load(routes) }
+        // Usually the expanded raster is cached. Reload only when TMap leaves the initial map bounds.
+        val routeBounds = SafeMapBounds.forRoutes(routes)
+        val raster = if (candidateRaster != null && routeBounds != null &&
+            !candidateRaster.bounds.contains(routeBounds)) {
+            withTimeoutOrNull(13_000) { SafeMapRouteRiskRepository.load(routes) } ?: candidateRaster
+        } else candidateRaster
         val choices = withContext(Dispatchers.Default) {
             candidates.mapIndexed { index, (_, route) ->
                 SafeMapRouteChoice(route.distanceMeters, scoredPlans[index].estimatedCost,
@@ -3466,7 +3529,8 @@ private fun findAndShowCctvSafeRoute(
     onRouteGuidanceStepsChanged: (List<RouteGuidanceStep>) -> Unit
 ) {
     if (!isRequestActive()) return
-    CctvRepository(view.context).loadCoordinates(
+    loadSafeRouteCctvCoordinates(
+        view = view,
         addressHints = listOf(startAddress, destinationAddress).filter(String::isNotBlank),
         hasEnoughCoordinates = { coordinates ->
             CctvSafeRoutePlanner.countRelevantCoordinates(
@@ -3480,7 +3544,7 @@ private fun findAndShowCctvSafeRoute(
         isRequestActive = isRequestActive,
         onProgress = onRouteSearchProgress,
         onCompleted = { coordinates ->
-            if (!isRequestActive()) return@loadCoordinates
+            if (!isRequestActive()) return@loadSafeRouteCctvCoordinates
             val showPlanWithStreetlights = showPlan@{ streetlightCoordinates: List<StreetlightCoordinate> ->
                 if (!isRequestActive()) return@showPlan
                 findValidCctvSafeRouteCandidate(
@@ -3501,7 +3565,7 @@ private fun findAndShowCctvSafeRoute(
                             generalDistanceMeters = generalDistanceMeters,
                             safeDistanceMeters = null,
                             candidateCctvCount = plan.candidateCctvCount,
-                            selectedWaypointCount = plan.waypoints.size,
+                            selectedWaypointCount = plan.waypointCount,
                             routeCctvCount = null,
                             routeStreetlightLampCount = null,
                             routeStreetlightLocationCount = null,
@@ -3510,10 +3574,10 @@ private fun findAndShowCctvSafeRoute(
                                 plan.estimatedStreetlightCoverageRatio
                         )
                         onCctvRouteAnalysisChanged(analysis)
-                        onRouteSearchProgress("검증된 CCTV·가로등 안전 경로를 안내합니다.")
+                        onRouteSearchProgress("범죄주의구간과 CCTV·가로등을 반영한 안심경로를 안내합니다.")
                         Log.i(
                             TMAP_LOG_TAG,
-                            "Showing validated CCTV safe route with ${plan.waypoints.size} waypoints. " +
+                            "Showing validated safe route with ${plan.waypointCount} waypoints. " +
                                 "distance=${routeResult.distanceMeters}, " +
                                 "coverage=${plan.estimatedCoverageRatio}, " +
                                 "candidates=${plan.candidateCctvCount}"
@@ -3647,8 +3711,7 @@ private fun findAndShowCctvSafeRoute(
                     showPlanWithStreetlights(emptyList())
                 }
             )
-        },
-        onFailed = onRouteSearchFailed
+        }
     )
 }
 

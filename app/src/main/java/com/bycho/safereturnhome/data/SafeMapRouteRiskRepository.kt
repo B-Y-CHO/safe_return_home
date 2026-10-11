@@ -38,8 +38,10 @@ internal object SafeMapRouteRiskRepository {
     private var legend: SafeMapLegend? = null
     private var legendSavedAt = 0L
 
-    suspend fun load(routes: List<List<RouteCoordinate>>): SafeMapRiskRaster? {
-        val bounds = SafeMapBounds.forRoutes(routes) ?: return null
+    suspend fun load(routes: List<List<RouteCoordinate>>, marginMeters: Double = 60.0): SafeMapRiskRaster? {
+        // If a wide candidate corridor would lose too much resolution, retain ordinary route analysis.
+        val bounds = SafeMapBounds.forRoutes(routes, marginMeters)
+            ?: SafeMapBounds.forRoutes(routes) ?: return null
         if (BuildConfig.SAFEMAP_API_KEY.isBlank()) return null
         return mutex.withLock {
             val now = System.nanoTime()

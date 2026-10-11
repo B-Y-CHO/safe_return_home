@@ -13,8 +13,11 @@ data class CctvSafeRoutePlan(
     val estimatedCost: Double,
     val estimatedCoverageRatio: Double,
     val estimatedStreetlightCoverageRatio: Double,
-    val candidateCctvCount: Int
-)
+    val candidateCctvCount: Int,
+    val riskWaypoints: List<RouteCoordinate> = emptyList()
+) {
+    val waypointCount get() = waypoints.size + riskWaypoints.size
+}
 
 object CctvSafeRoutePlanner {
     /** Score the returned walking polyline, not straight edges between proposed waypoints. */

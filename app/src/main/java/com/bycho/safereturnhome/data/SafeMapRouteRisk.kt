@@ -16,14 +16,15 @@ internal data class SafeMapBounds(val south: Double, val west: Double, val north
         north >= other.north && east >= other.east
 
     companion object {
-        fun forRoutes(routes: List<List<RouteCoordinate>>): SafeMapBounds? {
+        fun forRoutes(routes: List<List<RouteCoordinate>>, marginMeters: Double = 60.0): SafeMapBounds? {
+            if (!marginMeters.isFinite() || marginMeters < 0.0) return null
             val points = routes.flatten()
             if (points.isEmpty() || points.any {
                     !it.latitude.isFinite() || !it.longitude.isFinite() ||
                         it.latitude !in -85.0..85.0 || it.longitude !in -180.0..180.0
                 }) return null
             val latitude = points.map { it.latitude }.average()
-            val latMargin = 60.0 / 111_320.0
+            val latMargin = marginMeters / 111_320.0
             val lonMargin = latMargin / cos(Math.toRadians(latitude))
             // Stable bounds allow the preview and subsequent navigation search to share a raster.
             val step = 0.002
@@ -105,6 +106,42 @@ internal class SafeMapRiskRaster(
         require(bounds.widthMeters > 0 && bounds.heightMeters > 0)
     }
 
+    /** Keep actual classified road pixels, rather than placing waypoints on transparent map space. */
+    fun roadPoints(cellMeters: Double = 100.0): List<RouteCoordinate> {
+        require(cellMeters.isFinite() && cellMeters > 0.0)
+        val cellWidth = ceil(cellMeters / (bounds.widthMeters / width)).toInt().coerceAtLeast(1)
+        val cellHeight = ceil(cellMeters / (bounds.heightMeters / height)).toInt().coerceAtLeast(1)
+        val points = mutableListOf<RouteCoordinate>()
+        for (top in 0 until height step cellHeight) {
+            for (left in 0 until width step cellWidth) {
+                val right = minOf(left + cellWidth, width)
+                val bottom = minOf(top + cellHeight, height)
+                var bestIndex = -1
+                var bestGrade = 11
+                var bestDistance = Double.POSITIVE_INFINITY
+                val centerX = (left + right - 1) / 2.0
+                val centerY = (top + bottom - 1) / 2.0
+                for (y in top until bottom) {
+                    for (x in left until right) {
+                        val grade = grades[y * width + x].toInt()
+                        if (grade !in 1..10 || grade > bestGrade) continue
+                        val distance = (x - centerX).pow(2) + (y - centerY).pow(2)
+                        if (grade < bestGrade || distance < bestDistance) {
+                            bestIndex = y * width + x
+                            bestGrade = grade
+                            bestDistance = distance
+                        }
+                    }
+                }
+                if (bestIndex >= 0) points += RouteCoordinate(
+                    bounds.north - ((bestIndex / width) + 0.5) / height * (bounds.north - bounds.south),
+                    bounds.west + ((bestIndex % width) + 0.5) / width * (bounds.east - bounds.west)
+                )
+            }
+        }
+        return points
+    }
+
     fun gradeAt(point: RouteCoordinate): Int {
         if (point.latitude !in bounds.south..bounds.north || point.longitude !in bounds.west..bounds.east) return 0
         val x = ((point.longitude - bounds.west) / (bounds.east - bounds.west) * width)
@@ -135,7 +172,8 @@ internal class SafeMapRiskRaster(
         return grade
     }
 
-    fun measure(route: List<RouteCoordinate>): SafeMapRouteExposure {
+    fun measure(route: List<RouteCoordinate>, sampleIntervalMeters: Double = 10.0): SafeMapRouteExposure {
+        require(sampleIntervalMeters.isFinite() && sampleIntervalMeters > 0.0)
         var measured = 0.0
         var known = 0.0
         var high = 0.0
@@ -143,7 +181,7 @@ internal class SafeMapRiskRaster(
         for ((from, to) in route.zipWithNext()) {
             val distance = routePointDistance(from, to)
             if (!distance.isFinite() || distance <= 0) continue
-            val count = ceil(distance / 10.0).toInt().coerceIn(1, 10_000)
+            val count = ceil(distance / sampleIntervalMeters).toInt().coerceIn(1, 10_000)
             val stepMeters = distance / count
             for (index in 0 until count) {
                 val fraction = (index + 0.5) / count
